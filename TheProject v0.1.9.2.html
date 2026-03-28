@@ -1854,10 +1854,10 @@ class WorkerPool {
 
     if (type === 1) {
       const tasksMap = this.tasks;
-      const results = msg.results;
+      const results = msg.data;//results;
 
-      for (let i = 0; i < results.length; i++) {
-        const r = results[i];
+      //for (let i = 0; i < results.length; i++) {
+        const r = results;//[i];
         const taskId = r.taskId;
 
         const task = tasksMap.get(taskId);
@@ -1865,9 +1865,9 @@ class WorkerPool {
           tasksMap.delete(taskId);
           task.resolve(r.data);
         }
-      }
-      this.waitingWorkers.push(worker);
-      this._assignIfAvailable();
+      //}
+      //this.waitingWorkers.push(worker);
+      //this._assignIfAvailable();
       return;
     }
   }
@@ -4033,15 +4033,15 @@ const workerManager = {
               const result = processTask(data, jobType);
 
               if (result?.transfer) {
-                //self.postMessage(
-                  //{ type: 1, taskId, data: result.data },
-                  //result.transfer
-                //);
-                results.push({taskId, data: result.data});
-                transfer.concat(result.transfer);
+                self.postMessage(
+                  { type: 1, taskId, data: result.data },
+                  result.transfer
+                );
+                //results.push({taskId, data: result.data});
+                //transfer.concat(result.transfer);
               } else {
-                //self.postMessage({ type: 1, taskId, data: result });
-                results.push({taskId, data: result.data})
+                self.postMessage({ type: 1, taskId, data: result });
+                //results.push({taskId, data: result.data})
               }
 
             } catch (err) {
@@ -4052,10 +4052,10 @@ const workerManager = {
               });
             }
           }
-          self.postMessage({type: 1, results}, transfer);
+          //self.postMessage({type: 1, results}, transfer);
 
           // ask for more work after finishing all tasks
-          //self.postMessage({ type: 0 });
+          self.postMessage({ type: 0 });
         }
       };
     `;
