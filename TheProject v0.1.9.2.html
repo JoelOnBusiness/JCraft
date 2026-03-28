@@ -1076,45 +1076,68 @@ class ChunkModel {
     if(this.mesh) this.mesh.dispose();
     this.mesh = null;
   }
+  reset(){
+    if(this.mesh){
+      this.mesh.reset();
+    }
+  }
   draw(m, shaderModel, bottom, top){
     gl.uniformMatrix4fv(shaderModel,false,Mat4.multiply(m, this.transform.getMatrix()));
     return this.mesh.draw(bottom, top);
   }
 }
 class Chunk {
-  constructor(cx, cz) {
-    this.cx = cx; // chunk coordinates in world
-    this.cz = cz;
+  constructor() {
+    // chunk coordinates in world
+    this.cx = 0;
+    this.cz = 0;
 
     // Store blocks in a flat array (faster than nested arrays)
-    this.blocks = chunkBlockArrays.get();
+    this.blocks = new Uint16Array(CHUNK_VOLUME);
 
     this.model = new ChunkModel(new ChunkMesh(50000, countTexture));
-    this.model.transform.position = [
-      cx * CHUNK_SIZE,
-      0,
-      cz * CHUNK_SIZE
-    ];
-    this.model.transform.calculateMatrix();
     this.transparentModel = new ChunkModel(new ChunkMesh(20000, rawCountTexture));
-    this.transparentModel.transform.position = [
-      cx * CHUNK_SIZE,
-      0,
-      cz * CHUNK_SIZE
-    ];
-    this.transparentModel.transform.calculateMatrix();
-
+    // State tracking for generation and meshing
     this.state = {
       generated: false,
       meshed: new Array(CHUNK_HEIGHT/CHUNK_SIZE).fill(false),
       queuedForMesh: new Array(CHUNK_HEIGHT/CHUNK_SIZE).fill(false),
     }
-    
+  }
+
+  resetData(cx, cz){
+    this.cx = cx;
+    this.cz = cz;
+    this.blocks.fill(0);
+    this.model.transform.position = [
+      this.cx * CHUNK_SIZE,
+      0,
+      this.cz * CHUNK_SIZE
+    ];
+    this.model.transform.calculateMatrix();
+    this.transparentModel.transform.position = [
+      this.cx * CHUNK_SIZE,
+      0,
+      this.cz * CHUNK_SIZE
+    ];
+    this.transparentModel.transform.calculateMatrix();
+    this.state.generated = false;
+    this.state.meshed.fill(false);
+    this.state.queuedForMesh.fill(false);
+    this.model.reset();
+    this.transparentModel.reset();
+  }
+
+  release(){
+    this.model.mesh.release();
+    this.transparentModel.mesh.release();
   }
 
   unload(){
     if(this.model) this.model.unload();
-    chunkBlockArrays.release(this.blocks);
+    this.model = null;
+    if(this.transparentModel) this.transparentModel.unload();
+    this.transparentModel = null;
     this.blocks = null;
     this.cx = null;
     this.cz = null;
@@ -1531,47 +1554,16 @@ class ChunkMesh {
     this.SLOT_COUNT = Math.floor(this.BASE_VERTEX_ALLOCATION/ChunkMesh.VERTS_PER_SLOT);
     this.TOTAL_VERTS = this.SLOT_COUNT * ChunkMesh.VERTS_PER_SLOT;
     this.UINT32_PER_VERTEX = Math.ceil(this.BYTES_PER_VERTEX/4);
-    this.UINT32_COUNT = this.TOTAL_VERTS*this.UINT32_PER_VERTEX;
     this.UINT32_PER_SLOT = ChunkMesh.VERTS_PER_SLOT*this.UINT32_PER_VERTEX;
     this.UINT32_PER_FACE = this.UINT32_PER_VERTEX*this.VERTICES_PER_FACE
-    this.BYTES_PER_SLOT = ChunkMesh.VERTS_PER_SLOT*this.BYTES_PER_VERTEX;
-    this.BYTE_COUNT = this.TOTAL_VERTS*this.BYTES_PER_VERTEX;
     this.meshSlots = new Array(this.LAYERS)
     this.meshData = new Array(this.LAYERS);
     this.slotSizes = new Array(this.SLOT_COUNT);
-    this.layersExist = new Array(this.LAYERS).fill(false);
+    this.layersExist = new Array(this.LAYERS)
     this.nextSlot = 0;
     this.slotLength = 0;
-    this.slotCountTex = this.createSlotTexture();
-
-    for(let i = 0; i<this.LAYERS; i++){
-      this.meshSlots[i] = [];
-      this.meshData[i] = {first: null, last: null};
-    }
-
-    this.vao = gl.createVertexArray();
-    this.vbo = gl.createBuffer();
-
-    gl.bindVertexArray(this.vao);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.vbo);
-    gl.bufferData(
-      gl.ARRAY_BUFFER,
-      this.TOTAL_VERTS * this.BYTES_PER_VERTEX,
-      gl.DYNAMIC_DRAW
-    );
-
-    // uvec2 attribute
-    gl.enableVertexAttribArray(0);
-    gl.vertexAttribIPointer(
-      0,
-      2,
-      gl.UNSIGNED_INT,
-      8,
-      0
-    );
-
-    gl.bindBuffer(gl.ARRAY_BUFFER, null);
-    gl.bindVertexArray(null);
+    this.slotCountTex = null;
+    
   }
   updateSlotCount(slot, vertexCount) {
     this.slotSizes[slot] = vertexCount;
@@ -1713,14 +1705,51 @@ class ChunkMesh {
   doesLayerHaveMesh(layer){
     return this.meshSlots[layer]?.length > 0
   }
-  dispose(){
+  reset(){
     if (this.vbo) { gl.deleteBuffer(this.vbo); this.vbo = null; }
     if (this.vao) { gl.deleteVertexArray(this.vao); this.vao = null; }
-    this.meshSlots = null;
-    this.meshData = null;
-    this.meshSizes = null;
-    this.TOTAL_VERTS = 0;
+    for(let i = 0; i<this.LAYERS; i++){
+      this.meshSlots[i] = [];
+      this.meshData[i] = {first: null, last: null};
+      this.layersExist[i] = false;
+    }
+    this.slotSizes.fill(0);
+    this.nextSlot = 0;
+    this.slotLength = 0;
+    this.slotCountTex = this.createSlotTexture();
+    this.SLOT_COUNT = Math.floor(this.BASE_VERTEX_ALLOCATION/ChunkMesh.VERTS_PER_SLOT);
+    this.TOTAL_VERTS = this.SLOT_COUNT * ChunkMesh.VERTS_PER_SLOT;
+
+    this.vao = gl.createVertexArray();
+    this.vbo = gl.createBuffer();
+
+    gl.bindVertexArray(this.vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.vbo);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      this.TOTAL_VERTS * this.BYTES_PER_VERTEX,
+      gl.DYNAMIC_DRAW
+    );
+
+    // uvec2 attribute
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribIPointer(
+      0,
+      2,
+      gl.UNSIGNED_INT,
+      8,
+      0
+    );
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    gl.bindVertexArray(null);
   }
+  release(){
+    if (this.vbo) { gl.deleteBuffer(this.vbo); this.vbo = null; }
+    if (this.vao) { gl.deleteVertexArray(this.vao); this.vao = null; }
+    if (this.slotCountTex) { gl.deleteTexture(this.slotCountTex); this.slotCountTex = null; }
+  }
+
 }
 class TaskQueue {
   constructor(jobType, {
@@ -1854,16 +1883,16 @@ class WorkerPool {
 
     if (type === 1) {
       const tasksMap = this.tasks;
-      const results = msg.data;//results;
+      //const results = msg.results;
 
       //for (let i = 0; i < results.length; i++) {
-        const r = results;//[i];
-        const taskId = r.taskId;
+        //const r = results[i];
+        const taskId = msg.taskId;//r.taskId;
 
         const task = tasksMap.get(taskId);
         if (task !== undefined) {
           tasksMap.delete(taskId);
-          task.resolve(r.data);
+          task.resolve(msg.data);
         }
       //}
       //this.waitingWorkers.push(worker);
@@ -2009,7 +2038,7 @@ class ChunkCache {
     // oldest entry = first inserted
     const [oldKey, oldChunk] = this.map.entries().next().value;
     this.map.delete(oldKey);
-    if (oldChunk?.unload) oldChunk.unload();
+    chunkPool.release(oldChunk);
   }
 
   get(cx, cz) {
@@ -2045,7 +2074,7 @@ class ChunkCache {
     if (!chunk) return;
 
     this.map.delete(key);
-    if (chunk.unload) chunk.unload();
+    chunkPool.release(chunk);
   }
 
   size() {
@@ -2062,14 +2091,30 @@ class ArrayPool {
   }
 
   get() {
-    return this.pool.pop() || new Uint16Array(this.arraySize);
+    return this.pool.pop();
   }
 
   release(array) {
     this.pool.push(array);
   }
 }
+class ChunkPool {
+  constructor(initialSize = 10) {
+    this.pool = [];
+    for (let i = 0; i < initialSize; i++) {
+      this.pool.push(new Chunk());
+    }
+  }
 
+  get() {
+    return this.pool.pop()
+  }
+
+  release(chunk) {
+    chunk.release();
+    this.pool.push(chunk);
+  }
+}
 // ===== Helpers =====
 const Mat4 = {
   identity:()=>new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]),
@@ -3750,7 +3795,7 @@ console.log("GPU: " + utils.objectToKeyValueString(gpu));
 const initialRenderDist = Math.max(6, 12*gpu.tier);
 const chunkCacheAmount = (8*(initialRenderDist*initialRenderDist)+1800);
 const chunkCache = new ChunkCache(chunkCacheAmount);
-const chunkBlockArrays = new ArrayPool(chunkCacheAmount, CHUNK_VOLUME);
+const chunkPool = new ChunkPool(chunkCacheAmount+100); // Add some extra chunks to the pool
 const chunkVolumeArrays = new ArrayPool(chunkCacheAmount/8, CHUNK_SIZE*CHUNK_SIZE*CHUNK_SIZE);
 const chunkAreaArrays = new ArrayPool(chunkCacheAmount*6/8, CHUNK_SIZE*CHUNK_SIZE);
 const textRenderer = new TextRenderer(12, 16);
@@ -4024,8 +4069,8 @@ const workerManager = {
 
       self.onmessage = (e) => {
         const msg = e.data;
-        const results = [];
-        const transfer = [];
+        //const results = [];
+        //const transfer = [];
 
         if (msg.type === "tasks") {
           for (const { taskId, jobType, data } of msg.tasks) {
@@ -4040,7 +4085,7 @@ const workerManager = {
                 //results.push({taskId, data: result.data});
                 //transfer.concat(result.transfer);
               } else {
-                self.postMessage({ type: 1, taskId, data: result });
+                self.postMessage({ type: 1, taskId, data: result.data });
                 //results.push({taskId, data: result.data})
               }
 
@@ -4091,7 +4136,8 @@ const workerManager = {
     this.centralWorkerPool = pool;
   },
   requestChunkGeneration: async function (cx, cz){
-    const c = new Chunk(cx, cz);
+    const c = chunkPool.get(cx, cz);
+    c.resetData(cx, cz);
     const data = {
       cx: cx,
       cz: cz,
