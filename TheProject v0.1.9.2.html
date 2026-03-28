@@ -3748,7 +3748,7 @@ const SEED = 21;
 const gpu = GPU_DATABASE.estimateGpuPower(gl);
 console.log("GPU: " + utils.objectToKeyValueString(gpu));
 const initialRenderDist = Math.max(6, 12*gpu.tier);
-const chunkCacheAmount = (17*(initialRenderDist*initialRenderDist)+600);
+const chunkCacheAmount = (8*(initialRenderDist*initialRenderDist)+1800);
 const chunkCache = new ChunkCache(chunkCacheAmount);
 const chunkBlockArrays = new ArrayPool(chunkCacheAmount, CHUNK_VOLUME);
 const chunkVolumeArrays = new ArrayPool(chunkCacheAmount/8, CHUNK_SIZE*CHUNK_SIZE*CHUNK_SIZE);
