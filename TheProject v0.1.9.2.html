@@ -83,7 +83,8 @@ const vs = `#version 300 es
 precision mediump float;
 layout(location = 0) in uvec2 aPacked;
 uniform highp usampler2D uSlotCounts;
-uniform mat4 uPVM;
+uniform mat4 uPV;
+uniform mat4 uModel;
 const float INV_32 = 0.03125;
 const float INV_16 = 0.0625;
 const float INV_1023 = 0.0009775171104073524;
@@ -114,7 +115,7 @@ void main() {
     ) * INV_1023;
 
      // ---- branchless kill ----
-    gl_Position = uPVM * vec4(pos * alive, alive);
+    gl_Position = uPV * uModel * vec4(pos * alive, alive);
 }`
 const fs = `#version 300 es
 precision lowp float;
@@ -133,7 +134,8 @@ const float INV_32 = 0.03125;
 const float INV_16 = 0.0625;
 const float INV_1023 = 0.0009775171104073524;
 const vec3 SCALE_POS = vec3(INV_16, INV_32, INV_16);
-uniform mat4 uPVM;
+uniform mat4 uPV;
+uniform mat4 uModel;
 out vec2 vUV;
 void main() {
 
@@ -153,7 +155,7 @@ void main() {
         float((hi >> 10u) & 1023u)
     ) * INV_1023;
 
-    gl_Position = uPVM * vec4(pos, 1.0);
+    gl_Position = uPV * uModel * vec4(pos, 1.0);
 }`
 const compressedfs = `#version 300 es
 precision mediump float;
@@ -240,12 +242,15 @@ gl.attachShader(textProg,makeShader(gl.FRAGMENT_SHADER,textfs));
 gl.linkProgram(textProg);
 
 // ===== Shader Uniform locactions =====
-const uPVM = gl.getUniformLocation(prog,"uPVM");
+const uPV = gl.getUniformLocation(prog,"uPV");
+const uModel = gl.getUniformLocation(prog, "uModel");
 const uTexture = gl.getUniformLocation(prog, "uTexture");
 const countTexture = gl.getUniformLocation(prog, "uSlotCounts");
-const compressedPVM = gl.getUniformLocation(compressedProg,"uPVM");
+const compressedPV = gl.getUniformLocation(compressedProg,"uPV");
+const compressedModel = gl.getUniformLocation(compressedProg, "uModel");
 const compressedTexture = gl.getUniformLocation(compressedProg, "uTexture");
-const rawPVM = gl.getUniformLocation(rawProg,"uPVM");
+const rawPV = gl.getUniformLocation(rawProg,"uPV");
+const rawModel = gl.getUniformLocation(rawProg, "uModel");
 const rawTexture = gl.getUniformLocation(rawProg, "uTexture");
 const rawCountTexture = gl.getUniformLocation(rawProg, "uSlotCounts");
 const textProj = gl.getUniformLocation(textProg, "uProj");
@@ -278,7 +283,6 @@ const geometry = {
     -1,-1,-1,  1,-1,-1,  1,-1,1,
     -1,-1,-1,  1,-1,1,  -1,-1,1
   ]),
-
   cubeUVs: new Float32Array([
     // Front face
     0,0, 1,0, 1,1,
@@ -295,7 +299,6 @@ const geometry = {
     0,0, 1,0, 1,1,
     0,0, 1,1, 0,1
   ]),
-
   quadPositions: new Float32Array([
     // First triangle
     0, 1, 0,   // top-left
@@ -307,7 +310,6 @@ const geometry = {
     1, 0, 0,   // bottom-right
     0, 0, 0    // bottom-left
   ]),
-
   uiQuadUVs: new Float32Array([
     0, 0,
     1, 0,
@@ -317,7 +319,6 @@ const geometry = {
     1, 1,
     0, 1
   ])
-
 }
 const blockStates = {
 data: 
@@ -1061,8 +1062,8 @@ class Model {
     if(this.mesh) this.mesh.dispose();
     this.mesh = null;
   }
-  draw(m, shaderPVM){
-    gl.uniformMatrix4fv(shaderPVM,false,Mat4.multiply(m, this.transform.getMatrix()));
+  draw(shaderModel){
+    gl.uniformMatrix4fv(shaderModel,false,this.transform.getMatrix());
     this.mesh.draw();
   }
 }
@@ -1081,8 +1082,8 @@ class ChunkModel {
       this.mesh.reset();
     }
   }
-  draw(m, shaderModel, bottom, top){
-    gl.uniformMatrix4fv(shaderModel,false,Mat4.multiply(m, this.transform.getMatrix()));
+  draw(shaderModel, bottom, top){
+    gl.uniformMatrix4fv(shaderModel,false,this.transform.getMatrix());
     return this.mesh.draw(bottom, top);
   }
 }
@@ -1557,9 +1558,13 @@ class ChunkMesh {
     this.UINT32_PER_SLOT = ChunkMesh.VERTS_PER_SLOT*this.UINT32_PER_VERTEX;
     this.UINT32_PER_FACE = this.UINT32_PER_VERTEX*this.VERTICES_PER_FACE
     this.meshSlots = new Array(this.LAYERS)
-    this.meshData = new Array(this.LAYERS);
-    this.slotSizes = new Array(this.SLOT_COUNT);
-    this.layersExist = new Array(this.LAYERS)
+    for(let i = 0; i<this.LAYERS; i++){
+      this.meshSlots[i] = [];
+    }
+    this.meshDataFirsts = new Uint16Array(this.LAYERS);
+    this.meshDataLasts = new Uint16Array(this.LAYERS);
+    this.slotSizes = new Uint8Array(this.SLOT_COUNT);
+    this.layersExist = new Uint8Array(this.LAYERS)
     this.nextSlot = 0;
     this.slotLength = 0;
     this.slotCountTex = null;
@@ -1647,31 +1652,34 @@ class ChunkMesh {
         nextArray++;
       }
     }
-    if(!this.layersExist[meshIndex]) this.layersExist[meshIndex] = true;
+    if(this.layersExist[meshIndex] === 0) this.layersExist[meshIndex] = 1;
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
     gl.bindVertexArray(null);
   }
   allocateSlots(meshIndex, slots) {
     const allocatedSlots = [];
 
-    let meshData = this.meshData[meshIndex];
+    let meshDataFirst = this.meshDataFirsts[meshIndex];
+    let meshDataLast = this.meshDataLasts[meshIndex];
 
     for (let i = 0; i < slots; i++) {
       const slot = this.nextSlot++;
       this.meshSlots[meshIndex].push(slot);
       allocatedSlots.push(slot);
-      if(!meshData.first){
-        meshData.first=slot;
+      if(!meshDataFirst){
+        meshDataFirst=slot;
       }else{
-        meshData.first = Math.min(meshData.first, slot);
+        meshDataFirst = Math.min(meshDataFirst, slot);
       }
-      if(!meshData.last){
-        meshData.last=slot;
+      if(!meshDataLast){
+        meshDataLast=slot;
       }else{
-        meshData.last  = Math.max(meshData.last, slot);
+        meshDataLast  = Math.max(meshDataLast, slot);
       }
       this.slotLength = Math.max(this.slotLength, slot+1);
     }
+    this.meshDataFirsts[meshIndex] = meshDataFirst;
+    this.meshDataLasts[meshIndex] = meshDataLast;
     return allocatedSlots;
   }
   draw(bottom = 0, top = this.LAYERS-1) {
@@ -1679,39 +1687,51 @@ class ChunkMesh {
     gl.activeTexture(gl.TEXTURE8);
     gl.bindTexture(gl.TEXTURE_2D, this.slotCountTex);
     gl.bindVertexArray(this.vao);
-    const {first, last} = this.rangeMinMax(this.meshData, bottom, top)
+    const {first, last} = this.rangeMinMax(this.meshDataFirsts, this.meshDataLasts, bottom, top)
     if(first+last<0) return 0;
     const start = Math.max(first-1, 0)*ChunkMesh.VERTS_PER_SLOT;
     const length = Math.min((last+1)*ChunkMesh.VERTS_PER_SLOT, this.slotLength*ChunkMesh.VERTS_PER_SLOT) - start;
     gl.drawArrays(gl.TRIANGLES, start, length);
     return last+1 - first;
   }
-  rangeMinMax(arr, start, end) {
-    let min = Infinity;
-    let max = -Infinity;
+  rangeMinMax(firsts, lasts, start, end) {
+    const layers = this.layersExist;
+
+    let min = 0;
+    let max = 0;
     let found = false;
-    const layersexist = this.layersExist;
+
     for (let i = start; i <= end; i++) {
-      if(!layersexist[i])continue;
-      found = true;
-      const o = arr[i];
-      const f = o.first;
-      if (f < min) min = f;
-      const l = o.last;
-      if (l > max) max = l;
+      if (layers[i] === 0) continue;
+
+      const f = firsts[i];
+      const l = lasts[i];
+
+      if (!found) {
+          min = f;
+          max = l;
+          found = true;
+      } else {
+          if (f < min) min = f;
+          if (l > max) max = l;
+      }
     }
-    return found ? { first: min, last: max } : { first: -1, last: -1 };
+
+    return found
+        ? { first: min, last: max }
+        : { first: -1, last: -1 };
   }
   doesLayerHaveMesh(layer){
-    return this.meshSlots[layer]?.length > 0
+    return this.layersExist[layer] > 0
   }
   reset(){
     if (this.vbo) { gl.deleteBuffer(this.vbo); this.vbo = null; }
     if (this.vao) { gl.deleteVertexArray(this.vao); this.vao = null; }
     for(let i = 0; i<this.LAYERS; i++){
-      this.meshSlots[i] = [];
-      this.meshData[i] = {first: null, last: null};
-      this.layersExist[i] = false;
+      this.meshSlots[i].length = 0;
+      this.meshDataFirsts[i] = 0;
+      this.meshDataLasts[i] = 0;
+      this.layersExist[i] = 0;
     }
     this.slotSizes.fill(0);
     this.nextSlot = 0;
@@ -1749,7 +1769,6 @@ class ChunkMesh {
     if (this.vao) { gl.deleteVertexArray(this.vao); this.vao = null; }
     if (this.slotCountTex) { gl.deleteTexture(this.slotCountTex); this.slotCountTex = null; }
   }
-
 }
 class TaskQueue {
   constructor(jobType, {
@@ -2608,13 +2627,11 @@ const utils = {
     const id = document.getElementById("console");
     id.textContent = id.textContent.concat("\n"+text);
   },
-
   objectToKeyValueString: function (obj) {
   return "\t"+Object.entries(obj)
     .map(([key, value]) => `${key}: ${typeof value === 'object' ? (Array.isArray(value)? utils.arrayToGridString(value, 8): "[object]") : value}`)
     .join("\n\t");
   },
-
   arrayToGridString: function(arr, width) {
     let lines = [];
     for (let i = 0; i < arr.length; i += width) {
@@ -2623,7 +2640,6 @@ const utils = {
     }
     return lines.join('\n');
   },
-
   loadTexture: function (gl, base64, callback) {
     const img = new Image();
     img.src = base64; // base64 string works like a URL
@@ -2651,7 +2667,6 @@ const utils = {
     };
     img.onerror = (e) => console.error("Failed to load base64 texture", e);
   },
-
   createUiQuad: function (x, y, width, height, texIndex){
     const uvs = typeof texIndex === "number"? new Float32Array(meshUtils.getFaceUVs(texIndex)) : texIndex;
     const position = geometry.quadPositions;
@@ -2673,9 +2688,9 @@ const utils = {
     quadModel.transform.rotation = [ 0, 0, 0];
     quadModel.transform.position = [x,canvas.height-height-y,0];
     quadModel.transform.scale = [width,height,1];
+    quadModel.transform.calculateMatrix();
     return quadModel;
   },
-
   getChunksInRadius(centerCx, centerCz, radius) {
     const visible = [];
     const R2 = radius * radius;
@@ -2706,30 +2721,25 @@ const utils = {
 
     return visible;
   },
-
   isChunkInRadius: function (centerCx, centerCz, cx, cz, radius){
     const dx = centerCx - cx;
     const dz = centerCz = cz;
     return (dx * dx + dz * dz <= radius * radius)
   },
-
   chunkKey: function (cx, cz) {
     return (cx << 16) ^ cz;
   },
-
   dist: function(x, y, x1, y1){
     const dx = x - x1;
     const dy = y - y1;
     return Math.sqrt(dx*dx + dy*dy);
   },
-
   getNeighborSlices: function (out, east, west, north, south, layer) {
     out[0] = east  ? east.getXSlice(0, layer)               : null;
     out[1] = west  ? west.getXSlice(CHUNK_SIZE - 1, layer)  : null;
     out[2] = north ? north.getZSlice(0, layer)              : null;
     out[3] = south ? south.getZSlice(CHUNK_SIZE - 1, layer) : null;
   }, 
-
   dirs: [
     [ 0,  0,  1], // north
     [ 0,  0, -1],  // south
@@ -2739,7 +2749,6 @@ const utils = {
     { dir: [ 0, -1,  0], name: "down" }
     */
   ],
-
   getNeighborChunks: function (out, cx, cz){
     for(let i = 0; i < this.dirs.length; i++){
       const dir = this.dirs[i];
@@ -2749,7 +2758,6 @@ const utils = {
       out[i] = c
     }
   },
-  
   stringifyObjectWithFunctions: function (objName, obj) {
     const entries = Object.entries(obj).map(([key, value]) => {
       if (typeof value === "function") {
@@ -2763,7 +2771,6 @@ const utils = {
     });
     return `const ${objName} = { ${entries.join(",\n")} };`;
   },
-
   getAnyKey: function (obj) {
     for (let k in obj) return k; // minimal overhead
   },
@@ -3793,9 +3800,9 @@ const SEED = 21;
 const gpu = GPU_DATABASE.estimateGpuPower(gl);
 console.log("GPU: " + utils.objectToKeyValueString(gpu));
 const initialRenderDist = Math.max(6, 12*gpu.tier);
-const chunkCacheAmount = (8*(initialRenderDist*initialRenderDist)+1800);
+const chunkCacheAmount = (4*(initialRenderDist*initialRenderDist)+2400);
 const chunkCache = new ChunkCache(chunkCacheAmount);
-const chunkPool = new ChunkPool(chunkCacheAmount+100); // Add some extra chunks to the pool
+const chunkPool = new ChunkPool(chunkCacheAmount+25*Math.max(threadCapacity-1, 1)); // Add some extra chunks to the pool
 const chunkVolumeArrays = new ArrayPool(chunkCacheAmount/8, CHUNK_SIZE*CHUNK_SIZE*CHUNK_SIZE);
 const chunkAreaArrays = new ArrayPool(chunkCacheAmount*6/8, CHUNK_SIZE*CHUNK_SIZE);
 const textRenderer = new TextRenderer(12, 16);
@@ -4460,7 +4467,6 @@ function render(time){
     //chunkFaces: (chunkCache.get(camChunkX, camChunkZ)?.models?.[camChunkLayer]?.mesh?.TOTAL_VERTS || 0)/6,
     //transparentChunkFaces: (chunkCache.get(camChunkX, camChunkZ)?.transparentModels?.[camChunkLayer]?.mesh?.TOTAL_VERTS || 0)/6,
     usedSlots: camChunkMesh?.slotLength,
-    //meshSlots: camChunkMesh?.meshSlots,
     //slots: camChunkMesh?.slots,
     currentChunkState: "\n"+utils.objectToKeyValueString(chunkCache.get(camChunkX, camChunkZ)?.state || {}),
     chunks: chunksToRender.length,
@@ -4509,6 +4515,8 @@ function render(time){
   transparentDrawn = 0
   transparentModelIndex = 0;
   const layers = CHUNK_HEIGHT / CHUNK_SIZE;
+
+  gl.uniformMatrix4fv(uPV, false, m);
   
   for (let c = 0; c < chunksToRender.length; c++) {
     const { cx, cz } = chunksToRender[c];
@@ -4538,7 +4546,7 @@ function render(time){
     const model = chunk.model;
     const tModel = chunk.transparentModel;
     if (model?.mesh) {
-      drawn+=model.draw(m, uPVM, lowestLayer, highestLayer);
+      drawn+=model.draw(uModel, lowestLayer, highestLayer);
     }
     if (tModel?.mesh) {
       transparentModelsToDraw[transparentModelIndex++] = {tModel, lowestLayer, highestLayer, cx: chunk.cx, cz: chunk.cz};
@@ -4551,9 +4559,11 @@ function render(time){
   gl.enable(gl.DEPTH_TEST);
   gl.depthMask(false);
 
+  gl.uniformMatrix4fv(rawPV, false, m);
+
   for(let i = transparentModelIndex-1; i>=0; i--){
     const {tModel, lowestLayer, highestLayer, cx, cz} = transparentModelsToDraw[i];
-    const d = tModel.draw(m, rawPVM, lowestLayer, highestLayer);
+    const d = tModel.draw(rawModel, lowestLayer, highestLayer);
     drawn+=d;
     transparentDrawn+=d;
   }
@@ -4563,18 +4573,14 @@ function render(time){
   gl.enable(gl.BLEND);
 
   gl.useProgram(compressedProg);
-  
-  uiElements.forEach(model => model.draw(orthoMatrix, compressedPVM));
+  gl.uniformMatrix4fv(compressedPV, false, orthoMatrix);
+  uiElements.forEach(model => model.draw(compressedModel));
 
   gl.useProgram(textProg);
   gl.activeTexture(gl.TEXTURE1);
   gl.bindTexture(gl.TEXTURE_2D, textures[1]);
-  gl.uniformMatrix4fv(textProj, false, Mat4.ortho(
-    0,
-    canvas.width,
-    canvas.height,
-    0, -1, 1
-  ));
+  gl.uniformMatrix4fv(textProj, false, orthoMatrix
+  );
   
   gl.uniform4f(textColor, 1.0, 0.0, 0.0, 1.0);
 
