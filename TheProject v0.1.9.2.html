@@ -78,179 +78,6 @@ function resizeCanvas() {
 }
 resizeCanvas();
 window.addEventListener("resize", resizeCanvas);
-class InputManager {
-  constructor(canvas) {
-    this.keys = new Uint8Array(256);
-    this.prevKeys = new Uint8Array(256);
-
-    this.mouseDelta = [0, 0];
-    this.mouseButtons = new Uint8Array(3);
-
-    this.locked = false;
-
-    window.addEventListener("keydown", (e) => {
-      this.keys[e.keyCode] = 1;
-    });
-
-    window.addEventListener("keyup", (e) => {
-      this.keys[e.keyCode] = 0;
-    });
-
-    window.addEventListener("mousedown", (e) => {
-      this.mouseButtons[e.button] = 1;
-    });
-
-    window.addEventListener("mouseup", (e) => {
-      this.mouseButtons[e.button] = 0;
-    });
-
-    window.addEventListener("mousemove", (e) => {
-      if (this.locked) {
-        this.mouseDelta[0] += e.movementX;
-        this.mouseDelta[1] += e.movementY;
-      }
-    });
-
-    canvas.addEventListener("click", () => {
-      canvas.requestPointerLock();
-    });
-
-    document.addEventListener("pointerlockchange", () => {
-      this.locked = document.pointerLockElement === canvas;
-    });
-  }
-
-  update() {
-    this.mouseDelta[0] = 0;
-    this.mouseDelta[1] = 0;
-
-    this.prevKeys.set(this.keys);
-  }
-
-  isKeyDown(code) {
-    return this.keys[code] === 1;
-  }
-
-  isKeyPressed(code) {
-    return this.keys[code] === 1 && this.prevKeys[code] === 0;
-  }
-}
-const inputManager = new InputManager(canvas);
-class InputActions {
-  constructor(input) {
-    this.input = input;
-    this.actions = {};
-  }
-
-  bind(name, config) {
-    this.actions[name] = config;
-  }
-
-  // --- BUTTON ---
-  getButtonDown(name) {
-    const a = this.actions[name];
-    if (!a) return false;
-
-    for (const key of a.keys || []) {
-      if (this.input.isKeyDown(key)) return true;
-    }
-
-    for (const btn of a.mouseButtons || []) {
-      if (this.input.mouseButtons[btn]) return true;
-    }
-
-    return false;
-  }
-
-  getButtonPressed(name) {
-    const a = this.actions[name];
-    if (!a) return false;
-
-    for (const key of a.keys || []) {
-      if (this.input.isKeyPressed(key)) return true;
-    }
-
-    return false;
-  }
-
-  // --- AXIS (-1 to 1) ---
-  getAxis(name) {
-    const a = this.actions[name];
-    if (!a) return 0;
-
-    let value = 0;
-
-    if (a.positive) {
-      for (const key of a.positive) {
-        if (this.input.isKeyDown(key)) value += 1;
-      }
-    }
-
-    if (a.negative) {
-      for (const key of a.negative) {
-        if (this.input.isKeyDown(key)) value -= 1;
-      }
-    }
-
-    return Math.max(-1, Math.min(1, value));
-  }
-
-  // --- VECTOR2 ---
-  getVector2(name) {
-    const a = this.actions[name];
-    if (!a) return [0, 0];
-
-    if (a.type === "mouse") {
-      return this.input.mouseDelta;
-    }
-
-    return [
-      this.getAxis(a.x),
-      this.getAxis(a.y)
-    ];
-  }
-}
-function initializeKeyBindings(inputManager) {
-  const actions = new InputActions(inputManager);
-  const Keys = {
-    W: 87,
-    A: 65,
-    S: 83,
-    D: 68,
-    SPACE: 32,
-    SHIFT: 16
-  };
-
-  // movement axes
-  actions.bind("moveX", {
-    negative: [Keys.D],
-    positive: [Keys.A]
-  });
-
-  actions.bind("moveZ", {
-    negative: [Keys.S],
-    positive: [Keys.W]
-  });
-
-  // vertical
-  actions.bind("moveY", {
-    negative: [Keys.SHIFT],
-    positive: [Keys.SPACE]
-  });
-
-  // mouse look
-  actions.bind("look", {
-    type: "mouse"
-  });
-
-  // jump
-  actions.bind("jump", {
-    keys: [Keys.SPACE]
-  });
-
-    return actions;
-  }
-const inputActions = initializeKeyBindings(inputManager);
 const VERTS_PER_SLOT = 90;
 // ===== Shaders =====
 const vs = `#version 300 es
@@ -372,7 +199,6 @@ void main() {
   1.0
   );
 }`;
-//gl_Position = uProj * vec4(aPos, 0.0, 1.0);
 const textfs = `#version 300 es
 precision highp float;
 
@@ -905,6 +731,177 @@ const blockModels = {
   },
 }
 // ===== Classes =====
+class InputManager {
+  constructor(canvas) {
+    this.keys = new Uint8Array(256);
+    this.prevKeys = new Uint8Array(256);
+
+    this.mouseDelta = [0, 0];
+    this.mouseButtons = new Uint8Array(3);
+
+    this.locked = false;
+
+    window.addEventListener("keydown", (e) => {
+      this.keys[e.keyCode] = 1;
+    });
+
+    window.addEventListener("keyup", (e) => {
+      this.keys[e.keyCode] = 0;
+    });
+
+    window.addEventListener("mousedown", (e) => {
+      this.mouseButtons[e.button] = 1;
+    });
+
+    window.addEventListener("mouseup", (e) => {
+      this.mouseButtons[e.button] = 0;
+    });
+
+    window.addEventListener("mousemove", (e) => {
+      if (this.locked) {
+        this.mouseDelta[0] += e.movementX;
+        this.mouseDelta[1] += e.movementY;
+      }
+    });
+
+    canvas.addEventListener("click", () => {
+      canvas.requestPointerLock();
+    });
+
+    document.addEventListener("pointerlockchange", () => {
+      this.locked = document.pointerLockElement === canvas;
+    });
+  }
+
+  update() {
+    this.mouseDelta[0] = 0;
+    this.mouseDelta[1] = 0;
+
+    this.prevKeys.set(this.keys);
+  }
+
+  isKeyDown(code) {
+    return this.keys[code] === 1;
+  }
+
+  isKeyPressed(code) {
+    return this.keys[code] === 1 && this.prevKeys[code] === 0;
+  }
+}
+class InputActions {
+  static initializeKeyBindings(inputManager) {
+    const actions = new InputActions(inputManager);
+    const Keys = {
+      W: 87,
+      A: 65,
+      S: 83,
+      D: 68,
+      SPACE: 32,
+      SHIFT: 16
+    };
+
+    // movement axes
+    actions.bind("moveX", {
+      negative: [Keys.D],
+      positive: [Keys.A]
+    });
+
+    actions.bind("moveZ", {
+      negative: [Keys.S],
+      positive: [Keys.W]
+    });
+
+    // vertical
+    actions.bind("moveY", {
+      negative: [Keys.SHIFT],
+      positive: [Keys.SPACE]
+    });
+
+    // mouse look
+    actions.bind("look", {
+      type: "mouse"
+    });
+
+    // jump
+    actions.bind("jump", {
+      keys: [Keys.SPACE]
+    });
+
+    return actions;
+  }
+  constructor(input) {
+    this.input = input;
+    this.actions = {};
+  }
+
+  bind(name, config) {
+    this.actions[name] = config;
+  }
+
+  // --- BUTTON ---
+  getButtonDown(name) {
+    const a = this.actions[name];
+    if (!a) return false;
+
+    for (const key of a.keys || []) {
+      if (this.input.isKeyDown(key)) return true;
+    }
+
+    for (const btn of a.mouseButtons || []) {
+      if (this.input.mouseButtons[btn]) return true;
+    }
+
+    return false;
+  }
+
+  getButtonPressed(name) {
+    const a = this.actions[name];
+    if (!a) return false;
+
+    for (const key of a.keys || []) {
+      if (this.input.isKeyPressed(key)) return true;
+    }
+
+    return false;
+  }
+
+  // --- AXIS (-1 to 1) ---
+  getAxis(name) {
+    const a = this.actions[name];
+    if (!a) return 0;
+
+    let value = 0;
+
+    if (a.positive) {
+      for (const key of a.positive) {
+        if (this.input.isKeyDown(key)) value += 1;
+      }
+    }
+
+    if (a.negative) {
+      for (const key of a.negative) {
+        if (this.input.isKeyDown(key)) value -= 1;
+      }
+    }
+
+    return Math.max(-1, Math.min(1, value));
+  }
+
+  // --- VECTOR2 ---
+  getVector2(name) {
+    const a = this.actions[name];
+    if (!a) return [0, 0];
+
+    if (a.type === "mouse") {
+      return this.input.mouseDelta;
+    }
+
+    return [
+      this.getAxis(a.x),
+      this.getAxis(a.y)
+    ];
+  }
+}
 class TextRenderer {
   constructor(glyphSize = 16, atlasCols = 16, maxChars = 1024) {
     this.glyphSize = glyphSize;
@@ -2708,6 +2705,8 @@ class PlayerController {
   }
 }
 // ===== Helpers =====
+const inputManager = new InputManager(canvas);
+const inputActions = InputActions.initializeKeyBindings(inputManager);
 const Mat4 = {
   identity:()=>new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]),
   perspective:(fovy,aspect,near,far)=>{
@@ -5039,7 +5038,7 @@ function render(time){
       drawn+=model.draw(uModel, lowestLayer, highestLayer);
     }
     if (tModel?.mesh) {
-      transparentModelsToDraw[transparentModelIndex++] = {tModel, lowestLayer, highestLayer, cx: chunk.cx, cz: chunk.cz};
+      transparentModelsToDraw[transparentModelIndex++] = {tModel, lowestLayer, highestLayer};
     }
   }
 
@@ -5050,7 +5049,7 @@ function render(time){
   gl.uniformMatrix4fv(rawPV, false, m);
 
   for(let i = transparentModelIndex-1; i>=0; i--){
-    const {tModel, lowestLayer, highestLayer, cx, cz} = transparentModelsToDraw[i];
+    const {tModel, lowestLayer, highestLayer} = transparentModelsToDraw[i];
     const d = tModel.draw(rawModel, lowestLayer, highestLayer);
     drawn+=d;
     transparentDrawn+=d;
@@ -5092,8 +5091,8 @@ function render(time){
       //total: ((chunkCache.get(camChunkX, camChunkZ)?.models?.[camChunkLayer]?.mesh?.TOTAL_VERTS || 0) + (chunkCache.get(camChunkX, camChunkZ)?.transparentModels?.[camChunkLayer]?.mesh?.TOTAL_VERTS || 0))/6,
       //chunkFaces: (chunkCache.get(camChunkX, camChunkZ)?.models?.[camChunkLayer]?.mesh?.TOTAL_VERTS || 0)/6,
       //transparentChunkFaces: (chunkCache.get(camChunkX, camChunkZ)?.transparentModels?.[camChunkLayer]?.mesh?.TOTAL_VERTS || 0)/6,
-      usedSlots: currentChunk?.model?.mesh?.slotLength,
-      usedTransparentSlots: currentChunk?.transparentModel?.mesh?.slotLength,
+      usedSlots: currentChunk?.model?.mesh?.slotLength +" of "+currentChunk?.model?.mesh?.SLOT_COUNT,
+      usedTransparentSlots: currentChunk?.transparentModel?.mesh?.slotLength+" of "+currentChunk?.transparentModel?.mesh?.SLOT_COUNT,
       //slots: camChunkMesh?.slots,
       currentChunkState: "\n"+utils.objectToKeyValueString(currentChunk?.state || {}),
       chunks: chunksToRender.length,
