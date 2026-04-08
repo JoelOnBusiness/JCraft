@@ -855,13 +855,28 @@ function postShaderLoad(textureImages) {
   render(0);
 }
 async function loadWebGPU() {
+  const start = performance.now();
   console.log("loading WebGPU...");
+  const initWebGPUStart = performance.now();
   device = await initWebGPU();
+  const initWebGPUEnd = performance.now();
+  const resizeCanvasStart = performance.now();
   window.addEventListener("resize", resizeCanvas);
   resizeCanvas();
+  const resizeCanvasEnd = performance.now();
+  const loadShadersStart = performance.now();
   const textureImages = await loadShaders();
+  const loadShadersEnd = performance.now();
   console.log("WebGPU loaded.");
+  const postShaderLoadStart = performance.now();
   postShaderLoad(textureImages);
+  const postShaderLoadEnd = performance.now();
+  const end = performance.now();
+  console.log(`Init Web GPU Time: ${initWebGPUEnd - initWebGPUStart} ms`);
+  console.log(`Resize Canvas Time: ${resizeCanvasEnd - resizeCanvasStart} ms`);
+  console.log(`Load Shaders Time: ${loadShadersEnd - loadShadersStart} ms`);
+  console.log(`Post Shader Load Time: ${postShaderLoadEnd - postShaderLoadStart} ms`);
+  console.log(`Total Load Web GPU Execution Time: ${end - start} ms`);
 }
 loadWebGPU();
 // ===== Constants ===== 
@@ -1989,6 +2004,7 @@ class Chunk {
     this.uniformIndex = uniformIndex;
     this.cx = 0;
     this.cz = 0;
+    this.layerSize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
     this.blocks = new Uint16Array(CHUNK_VOLUME);
     this.initializedModels = shadersLoaded;
     if(this.initializedModels){
@@ -2011,38 +2027,39 @@ class Chunk {
   resetData(cx, cz) {
     this.cx = cx;
     this.cz = cz;
-    // 1. Reuse existing position arrays instead of creating new [x, y, z]
+
     const worldX = cx * CHUNK_SIZE;
-    const pos = this.model.transform.position;
+    const worldZ = cz * CHUNK_SIZE;
+
+    const modelTransform = this.model.transform;
+    const transparentTransform = this.transparentModel.transform;
+
+    const pos = modelTransform.position;
+
+    // Set position once
     pos[0] = worldX;
     pos[1] = 0;
-    pos[2] = cz * CHUNK_SIZE;
+    pos[2] = worldZ;
 
-    // 2. Point transparent model to the same array if they always move together
-    this.transparentModel.transform.position[0] = pos[0];
-    this.transparentModel.transform.position[1] = 0;
-    this.transparentModel.transform.position[2] = pos[2];
+    this.transparentModel.transform.position = this.model.transform.position;
 
-    this.model.transform.position[0] = pos[0];
-    this.model.transform.position[1] = 0;
-    this.model.transform.position[2] = pos[2];
-    // 3. Update matrices
-    this.model.transform.calculateMatrix();
-    this.transparentModel.transform.calculateMatrix();
+    // Update matrices
+    modelTransform.calculateMatrix();
+    transparentTransform.calculateMatrix();
+
     this.model.writeMatrixToBuffer();
     this.transparentModel.writeMatrixToBuffer();
 
-    // 4. Bulk reset typed arrays
+    // Reset data (already optimal)
     this.blocks.fill(0);
     this.state.meshed.fill(false);
     this.state.queuedForMesh.fill(false);
-    
     this.state.generated = false;
 
-    // 5. Reset mesh/buffers
+    // Reset meshes
     this.model.reset();
     this.transparentModel.reset();
-}
+  }
   release(){
     this.model.mesh.release();
     this.transparentModel.mesh.release();
@@ -2430,14 +2447,12 @@ class Chunk {
     }
     return slice;
   }
-  getLayer(layer){
-    const start = layer*CHUNK_SIZE * (CHUNK_SIZE *CHUNK_SIZE)
-    const end = (layer+1)*CHUNK_SIZE * (CHUNK_SIZE *CHUNK_SIZE)
-    const blocks = chunkVolumeArrays.get();
-    for(let i = start; i<end; i++){
-      blocks[i-start] = this.blocks[i];
-    }
-    return blocks;
+  getLayer(layer) {
+    const layerSize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
+    const start = layer * layerSize;
+    const out = chunkVolumeArrays.get();
+    out.set(this.blocks.subarray(start, start + layerSize));
+    return out;
   }
   static getBlockFromXSlice(slice, y, z) {
     const index = y * CHUNK_SIZE + z;
@@ -3208,11 +3223,11 @@ class ChunkPool {
 
   get() {
     const c= this.pool.pop()
-    if(this.pool.length === 0){
+    if(this.pool.length <= 10){
+      if(this.pool.length === 0) console.warn("Chunk pool exhausted, consider increasing pool size. Forcing eviction of least recently used chunks in cache.");
       chunkCache.forceEvict(50);
-    }else{
-      return c;
     }
+    return c;
   }
 
   release(chunk) {
@@ -3888,10 +3903,10 @@ const utils = {
   loadGPU: async function (){
     const gpu = await GPU_DATABASE.estimateGpuPower();
     console.log("GPU: " + utils.objectToKeyValueString(gpu));
-    const maxRenderDist = Math.max(12, 20*gpu.tier); // Minimum 12 chunks, scale up with GPU power
+    const maxRenderDist = Math.max(10, 8*gpu.tier + 8); // Minimum 10 chunks, scale up with GPU power
     const chunkCacheAmount = utils.getChunkCacheAmount(maxRenderDist);
     chunkCache.setSize(chunkCacheAmount);
-    chunkPool.setSize(chunkCacheAmount+maxRenderDist*maxRenderDist+300); // Add some extra chunks to the pool
+    chunkPool.setSize(chunkCacheAmount+300); // Add some extra chunks to the pool
     chunkVolumeArrays.setSize(chunkCacheAmount/8, CHUNK_SIZE*CHUNK_SIZE*CHUNK_SIZE);
     chunkAreaArrays.setSize(chunkCacheAmount*6/8, CHUNK_SIZE*CHUNK_SIZE);
     camera.renderDist = maxRenderDist;
@@ -3905,7 +3920,7 @@ const utils = {
     }
   },
   getChunkCacheAmount(renderDist){
-    return (4*(renderDist*renderDist)+2400);
+    return 3*(renderDist*renderDist)+2000;
   },
   blockAABB(x, y, z) {
     return {
@@ -4525,6 +4540,7 @@ const GPU_DATABASE = {
     { match: /arc\s*a770/, score: 9500 },
     { match: /arc\s*a750/, score: 8500 },
     { match: /arc\s*a580/, score: 6500 },
+    { match: /arc\s*/, score: 6000 },
     { match: /uhd\s*graphics\s*770/, score: 3000 },
     { match: /iris\s*xe\s*graphics\s*max/, score: 4000 },
     { match: /iris\s*xe\s*graphics/, score: 3500 },
@@ -5750,8 +5766,7 @@ function render(time){
   }
 
   if(debug.debugMode){
-    console.log(`Drawn: ${drawn}, Transparent Drawn: ${transparentDrawn}`);
-    console.log(currentChunk);
+
   }
 
   passEncoder.setPipeline(compressedUIShader.pipeline);
