@@ -63,7 +63,8 @@ const context = canvas.getContext("webgpu");
 canvas.width = window.innerWidth;
 canvas.height = window.innerHeight;
 let canvasWidth, canvasHeight;
-let depthView, device, opaqueShader, transparentShader, textShader, compressedUIShader, textRenderer = null;
+let renderPassDescriptor, depthView, device, opaqueShader, transparentShader, textShader, compressedUIShader, textRenderer = null;
+let timestampQuerySet, timestampQueryAvailable = false, timestampResolveBuffer, timestampResultBuffer;
 let shadersLoaded = false;
 if (!navigator.gpu) {
     alert("WebGPU is not supported in this browser.");
@@ -71,11 +72,31 @@ if (!navigator.gpu) {
 const format = navigator.gpu.getPreferredCanvasFormat();
 async function initWebGPU() {
     // Get GPU adapter
-    const adapter = await navigator.gpu.requestAdapter();
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
     if (!adapter) throw new Error("Failed to get GPU adapter.");
 
     // Request device
-    const device = await adapter.requestDevice();
+    const canTimestamp = adapter.features.has('timestamp-query');
+    const device = await adapter?.requestDevice({
+      requiredFeatures: [
+        ...(canTimestamp ? ['timestamp-query'] : []),
+      ],
+    });
+    if(canTimestamp){
+      timestampQuerySet = device.createQuerySet({
+        type: 'timestamp',
+        count: 2,
+      });
+      timestampResolveBuffer = device.createBuffer({
+        size: 16, // 2 timestamps * 8 bytes each
+        usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+      });
+      timestampResultBuffer = device.createBuffer({
+        size: 16,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+      });
+      timestampQueryAvailable = true;
+    }
     return device;
 }
 const VERTS_PER_SLOT = 90; // Must be a multiple of 3 for triangles
@@ -115,6 +136,9 @@ function resizeCanvas() {
       format: format,
       alphaMode: "premultiplied" // or "opaque" if you don't want transparency
     });
+    if(renderPassDescriptor) {
+      renderPassDescriptor.depthStencilAttachment.view = depthView;
+    }
   }
 async function loadShaders() {
   const vs =`
@@ -834,6 +858,28 @@ async function loadShaders() {
       ]
     });
   return shader;})(textTexturePackage);
+  renderPassDescriptor = {
+    colorAttachments: [{
+      view: null,
+      loadOp: "clear",
+      storeOp: "store",
+      clearValue: { r: 0.1, g: 0.1, b: 0.15, a: 1 }
+    }],
+    depthStencilAttachment: {
+      view: depthView,
+      depthLoadOp: "clear",
+      depthStoreOp: "store",
+      depthClearValue: 1.0,
+    },
+    ...(timestampQueryAvailable && {
+      timestampWrites: {
+        querySet: timestampQuerySet,
+        beginningOfPassWriteIndex: 0,
+        endOfPassWriteIndex: 1,
+      },
+    }),
+  }
+
   return [image];
 }
 function postShaderLoad(textureImages) {
@@ -852,7 +898,7 @@ function postShaderLoad(textureImages) {
   chunkPool.initializeModels();
   workerManager.initialize();
   updateVisibleChunks(Math.floor(camera.transform.position[0]/CHUNK_SIZE), Math.floor(camera.transform.position[2]/CHUNK_SIZE), camera.renderDist);
-  render(0);
+  requestAnimationFrame(render);
 }
 async function loadWebGPU() {
   const start = performance.now();
@@ -5242,19 +5288,24 @@ const debug = {
   text: "",
   debugMode: false,
   fpsSamples: [],
+  gpuTimes: [],
   fpsTimer: 0,
   fps_update(){
     // Record current FPS sample
     const fps = 1000 / (gameClock.deltaTime*1000);
     this.fpsSamples.push(fps);
     this.fpsTimer += gameClock.deltaTime*1000;
+    this.gpuTimes.push(gpuTime / 1000);
 
     // Every 250ms, calculate and display the average FPS
     if (this.fpsTimer >= 250) {
       const avgFps = this.fpsSamples.reduce((a, b) => a + b, 0) / this.fpsSamples.length;
       const lowFps = Math.min(...this.fpsSamples);
-      this.fpsElement.textContent = avgFps.toFixed(1) + " FPS\nlow: "+lowFps.toFixed(1)+" FPS";
+      const avgGpuTime = this.gpuTimes.reduce((a, b) => a + b, 0) / this.gpuTimes.length;
+      const highGpuTime = Math.max(...this.gpuTimes);
+      this.fpsElement.textContent = `${avgFps.toFixed(1)} FPS\nlow: ${lowFps.toFixed(1)} FPS\nGPU: avg: ${timestampQueryAvailable ? `${(avgGpuTime).toFixed(1)}µs` : 'N/A'}\nGPU: high: ${timestampQueryAvailable ? `${(highGpuTime).toFixed(1)}µs` : 'N/A'}`;
       this.fpsSamples.length = 0; // reset samples
+      this.gpuTimes.length = 0; // reset GPU times
       this.fpsTimer = 0; // reset timer
     }
   },
@@ -5664,9 +5715,11 @@ let prevChunkX = Math.floor(camera.getPosition()[0]/CHUNK_SIZE);
 let prevChunkZ = Math.floor(camera.getPosition()[2]/CHUNK_SIZE); 
 let drawn = 0;
 let transparentDrawn = 0;
+let gpuTime = 0;
 const transparentModelsToDraw = new Array(Math.ceil((camera.renderDist+1)*(camera.renderDist+1)*Math.PI)*(CHUNK_HEIGHT/CHUNK_SIZE));
 let transparentModelIndex = 0;
 const textColor = new Float32Array([1.0, 0.0, 0.0, 1.0]);
+
 function render(time){
   gameClock.tick(time);
 
@@ -5699,20 +5752,8 @@ function render(time){
   transparentModelIndex = 0;
 
   const commandEncoder = device.createCommandEncoder();
-  const passEncoder = commandEncoder.beginRenderPass({
-    colorAttachments: [{
-      view: context.getCurrentTexture().createView(),
-      loadOp: "clear",
-      storeOp: "store",
-      clearValue: { r: 0.1, g: 0.1, b: 0.15, a: 1 }
-    }],
-    depthStencilAttachment: {
-      view: depthView,
-      depthLoadOp: "clear",
-      depthStoreOp: "store",
-      depthClearValue: 1.0,
-    }
-  });
+  renderPassDescriptor.colorAttachments[0].view = context.getCurrentTexture().createView();
+  const passEncoder = commandEncoder.beginRenderPass(renderPassDescriptor);
   passEncoder.setPipeline(opaqueShader.pipeline);
   passEncoder.setBindGroup(0, opaqueShader.globalBindGroup);
   device.queue.writeBuffer(opaqueShader.uPVUniformBuffer, 0, m);
@@ -5813,8 +5854,23 @@ function render(time){
   // end pass
   passEncoder.end();
 
+  if (timestampQueryAvailable) {
+    commandEncoder.resolveQuerySet(timestampQuerySet, 0, timestampQuerySet.count, timestampResolveBuffer, 0);
+    if (timestampResultBuffer.mapState === 'unmapped') {
+      commandEncoder.copyBufferToBuffer(timestampResolveBuffer, 0, timestampResultBuffer, 0, timestampResultBuffer.size);
+    }
+  }
+
   // submit to GPU
   device.queue.submit([commandEncoder.finish()]);
+
+  if (timestampQueryAvailable && timestampResultBuffer.mapState === 'unmapped') {
+    timestampResultBuffer.mapAsync(GPUMapMode.READ).then(() => {
+      const times = new BigUint64Array(timestampResultBuffer.getMappedRange());
+      gpuTime = Number(times[1] - times[0]);
+      timestampResultBuffer.unmap();
+    });
+  }
 
   debug.fps_update();
   if(inputManager.isKeyPressed(74)){ // J for debug toggle
