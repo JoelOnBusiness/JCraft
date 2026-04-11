@@ -21,6 +21,7 @@
       padding: 2px 5px;
       border-radius: 3px;
       z-index: 100;
+      white-space: pre-wrap;
   "></div>
     <div id="pauseBtn" style="
       position: absolute;  /* so it stays on top of canvas */
@@ -63,7 +64,7 @@ const context = canvas.getContext("webgpu");
 canvas.width = window.innerWidth;
 canvas.height = window.innerHeight;
 let canvasWidth, canvasHeight;
-let renderPassDescriptor, depthView, device, opaqueShader, transparentShader, textShader, compressedUIShader, textRenderer = null;
+let renderPassDescriptor, depthView, device, opaqueShader, transparentShader, textShader, compressedUIShader, textRenderer, wireframeShader = null;
 let timestampQuerySet, timestampQueryAvailable = false, timestampResolveBuffer, timestampResultBuffer;
 let shadersLoaded = false;
 if (!navigator.gpu) {
@@ -141,6 +142,7 @@ function resizeCanvas() {
     }
   }
 async function loadShaders() {
+  const alignTo16 = (size) => Math.ceil(size / 16) * 16;
   const vs =`
   struct GlobalUniforms {
     uPV : mat4x4<f32>,
@@ -299,20 +301,20 @@ async function loadShaders() {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
     shader.globalBindGroup = device.createBindGroup({
-          layout: shader.pipeline.getBindGroupLayout(0),
-          entries: [
-              {
-                  binding: 0,
-                  resource: {
-                      buffer: shader.uPVUniformBuffer,
-                      offset: 0,
-                      size: 64//4x4 matrix
-                  }
-              },
-              { binding: 1, resource: shader.textureView },
-              { binding: 2, resource: shader.sampler }
-          ]
-      }); 
+        layout: shader.pipeline.getBindGroupLayout(0),
+        entries: [
+            {
+                binding: 0,
+                resource: {
+                    buffer: shader.uPVUniformBuffer,
+                    offset: 0,
+                    size: 64//4x4 matrix
+                }
+            },
+            { binding: 1, resource: shader.textureView },
+            { binding: 2, resource: shader.sampler }
+        ]
+    }); 
     shader.modelBindGroup = null; // created in resizeModelUniformBuffer
     shader.modelUniformStride = null; // set in resizeModelUniformBuffer 
     shader.modelUniformBuffer = null; // created in resizeModelUniformBuffer
@@ -858,6 +860,215 @@ async function loadShaders() {
       ]
     });
   return shader;})(textTexturePackage);
+  const wireframevs = `
+  struct Uniforms {
+    vp : mat4x4<f32>,
+  };
+
+  struct ModelUniforms {
+    model : mat4x4<f32>,
+    color : vec3<f32>,
+  };
+
+  @group(0) @binding(0)
+  var<uniform> uniforms : Uniforms;
+
+  @group(1) @binding(0)
+  var<uniform> modelUniforms : ModelUniforms;
+
+  struct VertexInput {
+      @location(0) position : vec3<f32>,
+      @location(1) barycentric : vec3<f32>,
+      @location(2) vertexIndex : f32, // for tinting
+  };
+
+  struct VertexOutput {
+    @builtin(position) position : vec4<f32>,
+    @location(0) barycentric : vec3<f32>,
+    @location(1) color : vec3<f32>,
+    @location(2) vIndex : f32, 
+  }
+
+  @vertex
+  fn vs_main(input : VertexInput) -> VertexOutput {
+      var out : VertexOutput;
+
+      let world = modelUniforms.model * vec4<f32>(input.position, 1.0);
+      out.position = uniforms.vp * world;
+
+      out.barycentric = input.barycentric;
+
+      out.color = modelUniforms.color;
+
+      out.vIndex = input.vertexIndex;
+
+      return out;
+  }`;
+  const wireframefs = `
+  const EDGE_THICKNESS : f32 = 2; // now in pixel-ish units
+
+  const V_INDEX_TINT : vec3<f32> = vec3<f32>(0.1, 0.3, 0.7); 
+
+  struct FragmentInput {
+      @location(0) barycentric : vec3<f32>,
+      @location(1) color : vec3<f32>,
+      @location(2) vIndex : f32,
+  };
+
+  @fragment
+  fn fs_main(input : FragmentInput) -> @location(0) vec4<f32> {
+      let d = min(min(input.barycentric.x, input.barycentric.y), input.barycentric.z);
+
+      // Pixel-consistent thickness
+      let width = max(fwidth(d), 1e-4) * EDGE_THICKNESS;
+
+      // Smooth edge using derivative-based width
+      let edge = smoothstep(0.0, width, d);
+      let wire = 1.0 - edge;
+
+      // Kill non-edge pixels
+      if (wire < 0.01) {
+          discard;
+      }
+
+      let TINT_STRENGTH = max(max(input.color.x, input.color.y), input.color.z)*0.75; // stronger tint on brighter colors
+
+      let tintShift = fract(V_INDEX_TINT * input.vIndex) * TINT_STRENGTH;
+      let color = (input.color + tintShift) * wire;
+
+      return vec4<f32>(color, wire);
+  }`;
+  wireframeShader = (()=>{
+    const shader = {};
+    shader.bindGroupLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.VERTEX, buffer:  { type: "uniform", hasDynamicOffset: false }}, // uniforms
+      ]
+    });
+    shader.modelBindGroupLayout = device.createBindGroupLayout({
+      entries: [
+        {
+          binding: 0,
+          visibility: GPUShaderStage.VERTEX,
+          buffer: {
+            type: "uniform",
+            hasDynamicOffset: true 
+          }
+        }
+      ]
+    });
+    shader.pipelineLayout = device.createPipelineLayout({
+      bindGroupLayouts: [shader.bindGroupLayout, shader.modelBindGroupLayout]
+    });
+    shader.pipeline = device.createRenderPipeline({
+      layout: shader.pipelineLayout,
+      vertex: {
+        module: device.createShaderModule({ code: wireframevs }),
+        entryPoint: "vs_main",
+        buffers: [
+          {
+            arrayStride: 28, // vec3 + vec3 + float = 7 * 4 bytes
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: "float32x3" }, // position
+              { shaderLocation: 1, offset: 12, format: "float32x3" },  // barycentric
+              { shaderLocation: 2, offset: 24, format: "float32" } // vertex index for tinting
+            ]
+          }
+        ]
+      },
+      fragment: {
+        module: device.createShaderModule({ code: wireframefs }),
+        entryPoint: "fs_main",
+        targets: [
+          { format: format,// canvas format
+            blend: {
+              color: {
+                srcFactor: "src-alpha",
+                dstFactor: "one-minus-src-alpha",
+                operation: "add",
+              },
+              alpha: {
+                srcFactor: "one",
+                dstFactor: "one-minus-src-alpha",
+                operation: "add",
+              },
+            },
+            writeMask: GPUColorWrite.ALL,
+          } 
+        ]
+      },
+      depthStencil: {
+        format: "depth24plus",
+        depthWriteEnabled: false,
+        depthCompare: "less-equal",
+      },
+      primitive: {
+        topology: "triangle-list",
+        cullMode: "none",
+        frontFace: "ccw"
+      }
+    });
+    shader.uPVUniformBuffer = device.createBuffer({
+      size: 64, // 4x4 matrix
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    shader.globalBindGroup = device.createBindGroup({
+      layout: shader.pipeline.getBindGroupLayout(0),
+      entries: [
+        {
+          binding: 0,
+          resource: {
+            buffer: shader.uPVUniformBuffer,
+            offset: 0,
+            size: 64//4x4 matrix
+          }
+        },
+      ]
+    }); 
+    shader.modelBindGroup = null; // created in resizeModelUniformBuffer
+    shader.modelUniformStride = null; // set in resizeModelUniformBuffer 
+    shader.modelUniformBuffer = null; // created in resizeModelUniformBuffer
+    shader.resizeModelUniformBuffer = (newSize)=>{
+      const UNIFORM_SIZE = alignTo16(64 + 12); // Model + color
+      const ALIGNMENT = 256;
+      const STRIDE = Math.ceil(UNIFORM_SIZE / ALIGNMENT) * ALIGNMENT;
+
+      const requiredSize = STRIDE * newSize;
+
+      // If buffer already exists and is big enough → reuse
+      if (shader.modelUniformBuffer && shader.modelUniformBuffer.size >= requiredSize) {
+          shader.modelUniformStride = STRIDE;
+          return;
+      }
+
+      // Otherwise recreate buffer
+      if (shader.modelUniformBuffer) shader.modelUniformBuffer.destroy();
+      shader.modelUniformBuffer = device.createBuffer({
+          size: requiredSize,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+      });
+
+      shader.modelUniformStride = STRIDE;
+
+      // IMPORTANT: must recreate bind group when buffer changes
+      shader.modelBindGroup = device.createBindGroup({
+          layout: shader.pipeline.getBindGroupLayout(1),
+          entries: [
+              {
+                  binding: 0,
+                  resource: {
+                      buffer: shader.modelUniformBuffer,
+                      offset: 0,
+                      size: UNIFORM_SIZE // NOT stride
+                  }
+              }
+          ]
+      });
+    };
+    shader.resizeModelUniformBuffer(256); 
+    return shader;
+  })();
+  
   renderPassDescriptor = {
     colorAttachments: [{
       view: null,
@@ -879,7 +1090,6 @@ async function loadShaders() {
       },
     }),
   }
-
   return [image];
 }
 function postShaderLoad(textureImages) {
@@ -893,6 +1103,8 @@ function postShaderLoad(textureImages) {
   blockStates.processBlockStates();
   utils.log(JSON.stringify(blockStates.data));
   utils.log(JSON.stringify(blockModels.resolvedModelData[meshUtils.getModelDetailsObject(8, converter.getMetaValue({facing: "north", half: "bottom", shape: "straight"}, "stairs")).m]));
+  collider.addWireframe();
+  debug.chunkWireframeModel = new WireframeModel(wireframeShader, new BoxWireframeMesh(CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE), [0,0,0]);
   opaqueShader.resizeModelUniformBuffer(chunkPool.size());
   transparentShader.resizeModelUniformBuffer(chunkPool.size());
   chunkPool.initializeModels();
@@ -1768,12 +1980,12 @@ class NibbleArrayPool{
   }
 }
 class Transform {
-  constructor() {
+  constructor(matrix = null) {
     this.position = new Float32Array([0,0,0]);
     this.rotation = new Float32Array(3); // pitch (x), yaw (y), roll unused
     this.scale    = new Float32Array([1, 1, 1]);
 
-    this.matrix = new Float32Array(16);
+    this.matrix = matrix || new Float32Array(16);
     this.calculateMatrix();
   }
 
@@ -1887,59 +2099,69 @@ class Mesh {
     gl.drawArrays(gl.TRIANGLES,0,this.vertexCount);
   }
 }
-class WireframeMesh{
-  constructor(){
-  // Quad VBO
-  this.lineCount = geometry.verts.length / 6;
-  this.vao = gl.createVertexArray();
-  gl.bindVertexArray(this.vao);
-
-  this.quadBuffer = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
-  gl.bufferData(gl.ARRAY_BUFFER, geometry.quad, gl.STATIC_DRAW);
-
-  // Line instance VBO
-  this.lineBuffer = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, this.lineBuffer);
-  gl.bufferData(gl.ARRAY_BUFFER, geometry.verts, gl.DYNAMIC_DRAW);
-
-  // --- Quad corners (per-vertex)
-  gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
-  gl.enableVertexAttribArray(0);
-  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-
-  // --- Line data (per-instance)
-  gl.bindBuffer(gl.ARRAY_BUFFER, this.lineBuffer);
-
-  // aStart
-  gl.enableVertexAttribArray(1);
-  gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 0);
-  gl.vertexAttribDivisor(1, 1);
-
-  // aEnd
-  gl.enableVertexAttribArray(2);
-  gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 24, 12);
-  gl.vertexAttribDivisor(2, 1);
-  gl.bindVertexArray(null);
+class BoxWireframeMesh{
+  constructor(width, height, depth){
+    const FLOATS_PER_VERTEX = 7; // 3 for position, 3 for barycentrics, 1 for face index
+    const vertices = this.createBox(width, height, depth);
+    this.vertexCount = vertices.length/FLOATS_PER_VERTEX; // 7 floats per vertex (pos + barycentrics + vertex index)
+    this.vertexBuffer = device.createBuffer({
+        size: vertices.length * 4, // size in bytes (4 bytes per uint32)
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: false
+    });
+    device.queue.writeBuffer(this.vertexBuffer, 0, vertices);
 
   }
   dispose(){
-    if (this.quadBuffer) { gl.deleteBuffer(this.quadBuffer); this.quadBuffer = null; }
-    if (this.lineBuffer) { gl.deleteBuffer(this.lineBuffer); this.lineBuffer = null; }
-    if (this.vao) { gl.deleteVertexArray(this.vao); this.vao = null; }
-    this.lineCount = 0;
+    if (this.vertexBuffer) { device.destroyBuffer(this.vertexBuffer); this.vertexBuffer = null; }
+    this.vertexCount = 0;
   }
-  draw() {
-    console.log("Drawing wireframe with "+this.lineCount+" lines");
-    gl.bindVertexArray(this.vao);
+  draw(passEncoder){ 
+    passEncoder.setVertexBuffer(0, this.vertexBuffer);
+    passEncoder.draw(this.vertexCount);
+  }
+  createBox(width, height, depth) {
+    const w = width / 2;
+    const h = height / 2;
+    const d = depth / 2;
+    let faceIndex = 0;
 
-    gl.drawArraysInstanced(
-      gl.TRIANGLE_STRIP,
-      0,
-      4,           // quad verts
-      this.lineCount    // instances
-    );
-    gl.bindVertexArray(null);
+    const vertices = [];
+
+    function tri(a, b, c) {
+        // barycentric coords per triangle
+        vertices.push(...a, 1, 0, 0, faceIndex);
+        vertices.push(...b, 0, 1, 0, faceIndex);
+        vertices.push(...c, 0, 0, 1, faceIndex);
+    }
+
+    // ---- FRONT (+Z)
+    tri([-w,-h, d], [ w,-h, d], [ w, h, d], faceIndex);
+    tri([-w,-h, d], [ w, h, d], [-w, h, d], faceIndex);
+    faceIndex++;
+    // ---- BACK (-Z)
+    tri([ w,-h,-d], [-w,-h,-d], [-w, h,-d], faceIndex);
+    tri([ w,-h,-d], [-w, h,-d], [ w, h,-d], faceIndex);
+    faceIndex++;
+
+    // ---- LEFT (-X)
+    tri([-w,-h,-d], [-w,-h, d], [-w, h, d], faceIndex);
+    tri([-w,-h,-d], [-w, h, d], [-w, h,-d], faceIndex);
+    faceIndex++;
+
+    // ---- RIGHT (+X)
+    tri([ w,-h, d], [ w,-h,-d], [ w, h,-d], faceIndex);
+    tri([ w,-h, d], [ w, h,-d], [ w, h, d], faceIndex);
+    faceIndex++;
+    // ---- TOP (+Y)
+    tri([-w, h, d], [ w, h, d], [ w, h,-d], faceIndex);
+    tri([-w, h, d], [ w, h,-d], [-w, h,-d], faceIndex);
+    faceIndex++;
+    // ---- BOTTOM (-Y)
+    tri([-w,-h,-d], [ w,-h,-d], [ w,-h, d], faceIndex);
+    tri([-w,-h,-d], [ w,-h, d], [-w,-h, d], faceIndex);
+
+    return new Float32Array(vertices);
   }
 }
 class CompressedMesh{
@@ -1994,31 +2216,52 @@ class Model {
   }
 }
 class WireframeModel {
-  //static mesh = new WireframeMesh();
-  //static models = [];
-  constructor(width, height, depth){
-    this.transform = new Transform();
-    this.transform.scale.set([width, height, depth]);
-    this.transform.calculateMatrix();
-    this.index = WireframeModel.models.length;
+  static models = [];
+  constructor(shader, mesh = null, color = [1,1,1]){
+    this.shader = shader;
+    this.uniformData = new Float32Array(this.shader.modelUniformStride / 4);
+    this.uniformData.set(color, 16); // color starts at float offset 16
+    this.transform = new Transform(this.uniformData.subarray(0, 16));
+    this.modelUniformIndex = WireframeModel.models.length;
+    this.toDraw = false;
+    if(mesh !== null){
+      this.mesh = mesh;
+      this.toDraw = true;
+    }
     WireframeModel.models.push(this);
+    this.writeModelUniformsToBuffer();
+  }
+  writeModelUniformsToBuffer(){
+    device.queue.writeBuffer(this.shader.modelUniformBuffer, this.modelUniformIndex * this.shader.modelUniformStride, this.uniformData);
   }
   setPosition(pos){
-    this.transform.setPosition(pos[0], pos[1], pos[2]);
+    this.transform.position.set(pos);
+    this.transform.calculateMatrix();
+    this.writeModelUniformsToBuffer();
   }
-  unload(){
-    WireframeModel.models.splice(this.index, 1);
-    this.transform = null;
+  swapMesh(mesh){
+    if(!mesh) return;
+    const oldMesh = this.mesh;
+    this.mesh = mesh;
+    return oldMesh;
   }
-  draw(shaderModel){
-    gl.uniformMatrix4fv(shaderModel,false,this.transform.getMatrix());
-    WireframeModel.mesh.draw();
+  hide(){
+    this.toDraw = false;
+  }
+  show(){
+    this.toDraw = true;
+  }
+  draw(passEncoder){
+    if(!this.toDraw) return;
+    const offset = this.modelUniformIndex * this.shader.modelUniformStride;
+    passEncoder.setBindGroup(1, this.shader.modelBindGroup, [offset]);
+    this.mesh.draw(passEncoder);
   }
 }
 class ChunkModel {
-  constructor(shader, uniformIndex, mesh){
+  constructor(shader, uniformIndex, mesh, transform = null){
     this.shader = shader;
-    this.transform = new Transform();
+    this.transform = transform || new Transform();
     this.uniformIndex = uniformIndex;
     if(mesh !== null) this.mesh = mesh;
   }
@@ -2050,12 +2293,12 @@ class Chunk {
     this.uniformIndex = uniformIndex;
     this.cx = 0;
     this.cz = 0;
+    this.transform = new Transform();
     this.layerSize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
     this.blocks = new Uint16Array(CHUNK_VOLUME);
     this.initializedModels = shadersLoaded;
     if(this.initializedModels){
-      this.model = new ChunkModel(opaqueShader, this.uniformIndex, new ChunkMesh(35000, opaqueShader));
-      this.transparentModel = new ChunkModel(transparentShader, this.uniformIndex, new ChunkMesh(15000, transparentShader));
+      createChunkModels();
     }
     this.state = {
       generated: false,
@@ -2066,9 +2309,12 @@ class Chunk {
   initModels(){
     if(this.initializedModels) return;
     if(!shadersLoaded) return;
-    this.model = new ChunkModel(opaqueShader, this.uniformIndex, new ChunkMesh(50000, opaqueShader));
-    this.transparentModel = new ChunkModel(transparentShader, this.uniformIndex, new ChunkMesh(20000, transparentShader));
+    this.createChunkModels();
     this.initializedModels = true;
+  }
+  createChunkModels(){
+    this.model = new ChunkModel(opaqueShader, this.uniformIndex, new ChunkMesh(50000, opaqueShader), this.transform);
+    this.transparentModel = new ChunkModel(transparentShader, this.uniformIndex, new ChunkMesh(20000, transparentShader), this.transform);
   }
   resetData(cx, cz) {
     this.cx = cx;
@@ -2077,21 +2323,15 @@ class Chunk {
     const worldX = cx * CHUNK_SIZE;
     const worldZ = cz * CHUNK_SIZE;
 
-    const modelTransform = this.model.transform;
-    const transparentTransform = this.transparentModel.transform;
-
-    const pos = modelTransform.position;
+    const pos = this.transform.position;
 
     // Set position once
     pos[0] = worldX;
     pos[1] = 0;
     pos[2] = worldZ;
 
-    this.transparentModel.transform.position = this.model.transform.position;
-
     // Update matrices
-    modelTransform.calculateMatrix();
-    transparentTransform.calculateMatrix();
+    this.transform.calculateMatrix();
 
     this.model.writeMatrixToBuffer();
     this.transparentModel.writeMatrixToBuffer();
@@ -2119,6 +2359,7 @@ class Chunk {
     this.cx = null;
     this.cz = null;
     this.state = null;
+    this.transform = null;
   }
   static index(x, y, z) {
     return y * (CHUNK_SIZE * CHUNK_SIZE) + z * CHUNK_SIZE + x;
@@ -2622,7 +2863,6 @@ class ChunkMesh {
   updateMesh(meshLayer, packedUint32Array){
     const meshIndex = meshLayer;
     const bindingArrays = this.splitVertexArray(packedUint32Array);
-    //console.log(bindingArrays);
     if(!this.vertexBuffer) console.warn("No vertex buffer to update ", this, " buffer ", this.vertexBuffer);
     const ownedSlots = this.meshSlots[meshIndex] || [];
     let nextArray = 0;
@@ -2636,6 +2876,9 @@ class ChunkMesh {
         0,
         bindingArrays[nextArray].length     // number of bytes to write. 4 bytes per uint32
       );
+      if(baseVertex*this.BYTES_PER_VERTEX + bindingArrays[nextArray].length*this.BYTES_PER_VERTEX > this.vertexBuffer.size){
+          console.warn("Attempting to write beyond vertex buffer size! ", this, " baseVertex ", baseVertex*this.BYTES_PER_VERTEX, " array length ", bindingArrays[nextArray].length*this.BYTES_PER_VERTEX, " buffer size ", this.vertexBuffer.size);
+      }
       this.updateSlotCount(slot, bindingArrays[nextArray].length/this.UINT32_PER_VERTEX);
       nextArray++;
     }
@@ -2652,6 +2895,9 @@ class ChunkMesh {
           0,
           bindingArrays[nextArray].length     // number of bytes to write. 4 bytes per uint32
         );    
+        if(baseVertex*this.BYTES_PER_VERTEX + bindingArrays[nextArray].length*this.BYTES_PER_VERTEX > this.vertexBuffer.size){
+          console.warn("Attempting to write beyond vertex buffer size! ", this, " baseVertex ", baseVertex*this.BYTES_PER_VERTEX, " array length ", bindingArrays[nextArray].length*this.BYTES_PER_VERTEX, " buffer size ", this.vertexBuffer.size);
+        }
         this.updateSlotCount(slot, bindingArrays[nextArray].length/this.UINT32_PER_VERTEX);
         nextArray++;
       }
@@ -3293,12 +3539,12 @@ class BoxCollider {
     return {
       min: [
         pos[0] - s[0] / 2,
-        pos[1],
+        pos[1] - s[1] / 2,
         pos[2] - s[2] / 2
       ],
       max: [
         pos[0] + s[0] / 2,
-        pos[1] + s[1],
+        pos[1] + s[1]/2,
         pos[2] + s[2] / 2
       ]
     };
@@ -3312,23 +3558,32 @@ class BoxCollider {
   resolveCollisions(entity, dt) {
     this.pos.set(entity.transform.position);
     this.vel.set(entity.velocity);
+    this.onGround = false;
     const pos = this.pos;
     const vel = this.vel;
 
     // --- X axis ---
     pos[0] += vel[0] * dt;
-    //utils.resolveAxis(this, vel, pos, 0);
+    utils.resolveAxis(this, vel, pos, 0);
 
     // --- Y axis ---
     pos[1] += vel[1] * dt;
-    //utils.resolveAxis(this, vel, pos, 1);
+    utils.resolveAxis(this, vel, pos, 1);
 
     // --- Z axis ---
     pos[2] += vel[2] * dt;
-    //utils.resolveAxis(this, vel,pos, 2);
+    utils.resolveAxis(this, vel,pos, 2);
 
     entity.setPosition(pos);
     entity.setVelocity(vel);
+  }
+  addWireframe(){
+    this.wireframe = new WireframeModel(wireframeShader, new BoxWireframeMesh(this.size[0], this.size[1], this.size[2]), [0.8, 0.6, 0]);
+  }
+  updateWireframe(entity){
+    if(this.wireframe){
+      this.wireframe.setPosition(entity.transform.position);
+    }
   }
 }
 class Camera {
@@ -3379,7 +3634,7 @@ class Entity {
     this.speed = 50;
   }
 
-  update(dt) {
+  update(dt, debug = false) {
     this.velocity.set([0,0,0]);
     if (this.controller) {
       this.controller.update(this, dt);
@@ -3390,7 +3645,8 @@ class Entity {
     if (this.camera) {
       this.camera.updateFromEntity(this);
     }
-    if(debug.debugMode && this.collider){
+    if(debug && this.collider){
+      this.collider.updateWireframe(this);
     }
   }
 
@@ -4055,41 +4311,62 @@ const utils = {
     );
   },
   resolveAxis(col, vel, pos, axis) {
-    const {neighborChunks, blcx, blcz} = utils.getNeighborChunksForCollision(pos[0], pos[2]);
+    const { neighborChunks, blcx, blcz } = utils.getNeighborChunksForCollision(pos[0], pos[2]);
+
     const aabb = col.getAABB(pos);
     const blocks = utils.getPotentialBlocks(aabb, neighborChunks, blcx, blcz);
-    //console.log("Checking collisions on axis", axis, "with", blocks.length, "potential blocks");
+    const EPSILON = 0.001;
+    let bestCorrection = 0;
+    let found = false;
+
     for (const b of blocks) {
       const blockBox = utils.blockAABB(b.x, b.y, b.z);
 
       if (!utils.intersects(aabb, blockBox)) continue;
 
+      let correction = 0;
+
       if (axis === 0) {
         if (vel[0] > 0) {
-          pos[0] = blockBox.min[0] - col.size[0] / 2;
+          correction = blockBox.min[0] - aabb.max[0];
         } else if (vel[0] < 0) {
-          pos[0] = blockBox.max[0] + col.size[0] / 2;
+          correction = blockBox.max[0] - aabb.min[0];
         }
-        vel[0] = 0;
       }
 
       if (axis === 1) {
         if (vel[1] > 0) {
-          pos[1] = blockBox.min[1] - col.size[1];
+          correction = blockBox.min[1] - aabb.max[1];
         } else if (vel[1] < 0) {
-          pos[1] = blockBox.max[1];
-          col.onGround = true;
+          correction = blockBox.max[1] - aabb.min[1];
         }
-        vel[1] = 0;
       }
 
       if (axis === 2) {
         if (vel[2] > 0) {
-          pos[2] = blockBox.min[2] - col.size[2] / 2;
+          correction = blockBox.min[2] - aabb.max[2];
         } else if (vel[2] < 0) {
-          pos[2] = blockBox.max[2] + col.size[2] / 2;
+          correction = blockBox.max[2] - aabb.min[2];
         }
-        vel[2] = 0;
+      }
+
+      // We only care about corrections that push us OUT
+      if (correction === 0) continue;
+
+      // Pick the smallest magnitude correction (closest collision)
+      if (!found || Math.abs(correction) < Math.abs(bestCorrection)) {
+        bestCorrection = correction;
+        found = true;
+      }
+    }
+
+    if (found) {
+      pos[axis] += bestCorrection+EPSILON * Math.sign(bestCorrection);
+      vel[axis] = 0;
+
+      // Ground detection
+      if (axis === 1 && bestCorrection > 0) {
+        col.onGround = true;
       }
     }
   },
@@ -5289,13 +5566,16 @@ const debug = {
   debugMode: false,
   fpsSamples: [],
   gpuTimes: [],
+  jsTimes: [],
   fpsTimer: 0,
+  chunkWireframeModel: null,
   fps_update(){
     // Record current FPS sample
     const fps = 1000 / (gameClock.deltaTime*1000);
     this.fpsSamples.push(fps);
     this.fpsTimer += gameClock.deltaTime*1000;
     this.gpuTimes.push(gpuTime / 1000);
+    this.jsTimes.push(jsTime);
 
     // Every 250ms, calculate and display the average FPS
     if (this.fpsTimer >= 250) {
@@ -5303,9 +5583,13 @@ const debug = {
       const lowFps = Math.min(...this.fpsSamples);
       const avgGpuTime = this.gpuTimes.reduce((a, b) => a + b, 0) / this.gpuTimes.length;
       const highGpuTime = Math.max(...this.gpuTimes);
-      this.fpsElement.textContent = `${avgFps.toFixed(1)} FPS\nlow: ${lowFps.toFixed(1)} FPS\nGPU: avg: ${timestampQueryAvailable ? `${(avgGpuTime).toFixed(1)}µs` : 'N/A'}\nGPU: high: ${timestampQueryAvailable ? `${(highGpuTime).toFixed(1)}µs` : 'N/A'}`;
+      const avgJsTime = this.jsTimes.reduce((a, b) => a + b, 0) / this.jsTimes.length;
+      const highJsTime = Math.max(...this.jsTimes);
+      this.fpsElement.textContent = `${avgFps.toFixed(1)} FPS low: ${lowFps.toFixed(1)} FPS\nGPU: avg: ${timestampQueryAvailable ? `${(avgGpuTime).toFixed(1)}µs` : 'N/A'} high: ${timestampQueryAvailable ? `${(highGpuTime).toFixed(1)}µs` : 'N/A'}\nJS: avg: ${timestampQueryAvailable ? `${(avgJsTime).toFixed(1)}ms` : 'N/A'} high: ${timestampQueryAvailable ? `${(highJsTime).toFixed(1)}ms` : 'N/A'}`;
       this.fpsSamples.length = 0; // reset samples
       this.gpuTimes.length = 0; // reset GPU times
+      this.jsTimes.length = 0; // reset JS times
+
       this.fpsTimer = 0; // reset timer
     }
   },
@@ -5715,15 +5999,18 @@ let prevChunkX = Math.floor(camera.getPosition()[0]/CHUNK_SIZE);
 let prevChunkZ = Math.floor(camera.getPosition()[2]/CHUNK_SIZE); 
 let drawn = 0;
 let transparentDrawn = 0;
-let gpuTime = 0;
+let gpuTime, jsTime = 0;
 const transparentModelsToDraw = new Array(Math.ceil((camera.renderDist+1)*(camera.renderDist+1)*Math.PI)*(CHUNK_HEIGHT/CHUNK_SIZE));
 let transparentModelIndex = 0;
 const textColor = new Float32Array([1.0, 0.0, 0.0, 1.0]);
 
 function render(time){
+
+  const jsStart = time;
+
   gameClock.tick(time);
 
-  player.update(gameClock.deltaTime);
+  player.update(gameClock.deltaTime, debug.debugMode);
 
   const camPos = camera.getPosition();
   const camChunkX = Math.floor(camPos[0]/CHUNK_SIZE);
@@ -5733,6 +6020,7 @@ function render(time){
   const aspect = canvasWidth/canvasHeight;
   if(camChunkX !== prevChunkX || camChunkZ!== prevChunkZ){
     updateVisibleChunks(camChunkX, camChunkZ, camera.renderDist);
+    debug.chunkWireframeModel.setPosition([camChunkX*CHUNK_SIZE+CHUNK_SIZE/2, CHUNK_HEIGHT/2, camChunkZ*CHUNK_SIZE+CHUNK_SIZE/2]);
   }
   prevChunkX = camChunkX;
   prevChunkZ = camChunkZ;
@@ -5760,6 +6048,11 @@ function render(time){
   
   for (let c = 0; c < chunksToRender.length; c++) {
     const { cx, cz } = chunksToRender[c];
+    if(debug.debugMode && debug.inspectingMode){
+      if(!(cx === debug.inspectingChunk.x && cz === debug.inspectingChunk.z)){
+        continue;
+      }
+    }
     let lowestLayer = 0;
     let highestLayer = 0;
     let visible = false;
@@ -5807,7 +6100,13 @@ function render(time){
   }
 
   if(debug.debugMode){
-
+    passEncoder.setPipeline(wireframeShader.pipeline);
+    passEncoder.setBindGroup(0, wireframeShader.globalBindGroup);
+    device.queue.writeBuffer(wireframeShader.uPVUniformBuffer, 0, m);
+    for (let c = WireframeModel.models.length-1; c >=0; c--) {
+      const wireframe = WireframeModel.models[c];
+      wireframe.draw(passEncoder);
+    }
   }
 
   passEncoder.setPipeline(compressedUIShader.pipeline);
@@ -5872,12 +6171,21 @@ function render(time){
     });
   }
 
-  debug.fps_update();
   if(inputManager.isKeyPressed(74)){ // J for debug toggle
     debug.debugMode = !debug.debugMode;
   } 
+  if(inputManager.isKeyPressed(75)){ // K for debug toggle
+    debug.inspectingMode = !debug.inspectingMode;
+    if(debug.inspectingMode){
+      debug.inspectingChunk = { x: camChunkX, z: camChunkZ };
+    }
+  } 
 
   inputManager.update();
+
+  jsTime = performance.now() - jsStart;
+
+  debug.fps_update();
 
   if(running){
     frameId = requestAnimationFrame(render);
