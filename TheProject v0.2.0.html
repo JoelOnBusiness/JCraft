@@ -1614,6 +1614,97 @@ const blockModels = {
   },
 }
 // ===== Classes =====
+class vec3 {
+  static identity = new Float32Array([0, 0, 0]);
+  constructor(array = new Float32Array(3)) {
+    this.array = array;
+  }
+
+  get x() {
+    return this.array[0];
+  }
+  get y() {
+    return this.array[1];
+  }
+  get z() {
+    return this.array[2];
+  }
+
+  get 0() {
+    return this.array[0];
+  }
+  get 1() {
+    return this.array[1];
+  }
+  get 2() {
+    return this.array[2];
+  }
+
+  set x(value) {
+    this.array[0] = value;
+  }
+  set y(value) {
+    this.array[1] = value;
+  }
+  set z(value) {
+    this.array[2] = value;
+  }
+
+  set 0(value) {
+    this.array[0] = value;
+  }
+  set 1(value) {
+    this.array[1] = value;
+  }
+  set 2(value) {
+    this.array[2] = value;
+  }
+  add(other) {
+    this.array[0] += other[0];
+    this.array[1] += other[1];
+    this.array[2] += other[2];
+    return this;
+  }
+  sub(other) {
+    this.array[0] -= other[0];
+    this.array[1] -= other[1];
+    this.array[2] -= other[2];
+    return this;
+  }
+  mul(scalar) {
+    this.array[0] *= scalar;
+    this.array[1] *= scalar;
+    this.array[2] *= scalar;
+    return this;
+  }
+  set(array){
+    this.array.set(array);
+    return this;
+  }
+  identity(){
+    this.array.set(vec3.identity);
+    return this;
+  }
+  toString(){
+    return `vec3(${this.x.toFixed(6)}, ${this.y.toFixed(6)}, ${this.z.toFixed(6)})`;
+  }
+  mag(){
+    return Math.sqrt(this.x*this.x + this.y*this.y + this.z*this.z);
+  }
+  clone(){
+    return new vec3(new Float32Array(this.array));
+  }
+  normalize(){
+    const m = this.mag();
+    if(m > 0){
+      this.mul(1/m);
+    }
+    return this;
+  }
+  dot(other){
+    return this.x*other[0] + this.y*other[1] + this.z*other[2];
+  }
+}
 class InputManager {
   constructor(canvas) {
     this.keys = new Uint8Array(256);
@@ -3530,24 +3621,26 @@ class ChunkPool {
 class BoxCollider {
   constructor(width, height, depth) {
     this.size = new Float32Array([width, height, depth]);
-    this.pos = new Float32Array(3);
+    this.pos = new vec3();
     this.onground = false;
-    this.vel = new Float32Array(3);
+    this.vel = new vec3();
+    this.aabb = {min: new vec3(), max: new vec3()};
   }
-  getAABB(pos) {
-    const s = this.size;
-    return {
-      min: [
-        pos[0] - s[0] / 2,
-        pos[1] - s[1] / 2,
-        pos[2] - s[2] / 2
-      ],
-      max: [
-        pos[0] + s[0] / 2,
-        pos[1] + s[1]/2,
-        pos[2] + s[2] / 2
-      ]
-    };
+  getAABB(pos, scale = 1) {
+    const sx = this.size[0]*scale;
+    const sy = this.size[1]*scale;
+    const sz = this.size[2]*scale;
+    this.aabb.min.set([
+      pos[0] - sx / 2, 
+      pos[1] - sy / 2, 
+      pos[2] - sz / 2
+    ]);
+    this.aabb.max.set([
+      pos[0] + sx / 2,
+      pos[1] + sy / 2,
+      pos[2] + sz / 2
+    ]);
+    return this.aabb;
   }
   update(entity, dt) {
     this.resolveCollisions(entity, dt);
@@ -3556,26 +3649,177 @@ class BoxCollider {
     entity.collider = this;
   }
   resolveCollisions(entity, dt) {
-    this.pos.set(entity.transform.position);
-    this.vel.set(entity.velocity);
-    this.onGround = false;
-    const pos = this.pos;
-    const vel = this.vel;
+    this.vel.set(entity.getVelocity());
+    this.pos.set(entity.getPosition());
+    this.applyWorldCollisions(this.pos, this.vel, dt);
+    entity.setPosition(this.pos.array);
+    entity.setVelocity(this.vel.array);
+  }
+  applyWorldCollisions(pos, vel, dt) {
+    const epsilon = 0.001;
+    const totalMovementVec = new vec3().set(vel.array).mul(dt);
+    const totalDistance = totalMovementVec.mag();
 
-    // --- X axis ---
-    pos[0] += vel[0] * dt;
-    utils.resolveAxis(this, vel, pos, 0);
+    if(totalDistance === 0 || totalDistance < epsilon) return;
 
-    // --- Y axis ---
-    pos[1] += vel[1] * dt;
-    utils.resolveAxis(this, vel, pos, 1);
+    const step = CHUNK_SIZE/2-1;
+    const movementDir = totalMovementVec.clone().normalize();
+    const constantStepMovement = movementDir.clone().mul(step);
+    const stepMovement = constantStepMovement.clone();
+    const collisionAlongMovement = new vec3();
+    const collisionNormal = new vec3();
+    const earliestCollision = {time: 1, normal: new vec3()};
+    const maxSteps = Math.ceil(totalDistance / step);
+    const maxIterationsPerStep = 3;
+    const paddedStepMovement = new vec3();
+    const normalEpsilon = new vec3();
+    let pastQuadrantX = null;
+    let pastQuadrantZ = null;
+    let pastChunks = {neighborChunks: [], blcx: null, blcz: null};
+    let stepCollided = false;
+    for(let i = 0; i<maxSteps; i++){ //Step through movement in increments of "step" to prevent tunneling through blocks
+      console.warn('step '+i+' of movement');
+      stepMovement.set(constantStepMovement.array);
+      if(stepMovement.mag() > totalDistance) {
+        stepMovement.set(totalMovementVec.array);
+      }else if(i === maxSteps-1){
+        stepMovement.set(totalMovementVec.sub(stepMovement.mul(i)).array);
+      }
+      console.log('step velocity ', stepMovement.toString());
+      paddedStepMovement.set(stepMovement.array).mul(1.1);
+      //find which chunks we need to check collisions in based on current position
+      const currentQuadX = Math.floor(pos[0]/(CHUNK_SIZE/2));
+      const currentQuadZ = Math.floor(pos[2]/(CHUNK_SIZE/2));
 
-    // --- Z axis ---
-    pos[2] += vel[2] * dt;
-    utils.resolveAxis(this, vel,pos, 2);
+      if(currentQuadX !== pastQuadrantX || currentQuadZ !== pastQuadrantZ){
+        pastQuadrantX = currentQuadX;
+        pastQuadrantZ = currentQuadZ;
+        pastChunks = utils.getNeighborChunksForCollision(pos[0], pos[2]);
+      } 
+      const {neighborChunks, blcx, blcz} = pastChunks;
 
-    entity.setPosition(pos);
-    entity.setVelocity(vel);
+      for(let j = 0; j<maxIterationsPerStep; j++){ //allow multiple collision checks per step to handle corner cases like being pushed into a wall and then sliding along it
+        console.log('---------- step iteration '+j+" ------------------")
+        const sweptAABB = utils.getSweptBroadphaseAABB(this.getAABB(pos), paddedStepMovement);
+
+        const blocks = utils.getPotentialBlocksInAABB(sweptAABB, neighborChunks, blcx, blcz);
+        
+        earliestCollision.time = 1;
+        earliestCollision.normal.identity();
+        for (let j = 0; j<blocks.length; j++){
+          const block = blocks[j];
+          const collision = this.checkCollisionWithVoxel( utils.blockAABB(block.x, block.y, block.z), pos, stepMovement, collisionNormal);
+          if(collision){
+            if(collision.time < earliestCollision.time){
+              earliestCollision.time = collision.time;
+              earliestCollision.normal.set(collision.normal.array);
+            }
+          }
+        }
+        if(earliestCollision.time === 1) {
+          pos.add(stepMovement);
+          console.log("No collision, moving full step to ", pos.toString());
+          break;
+        }
+        stepCollided = true;
+
+        collisionAlongMovement.set(stepMovement.array).mul(earliestCollision.time);
+        pos.add(collisionAlongMovement);
+        console.log("Collision at time ", earliestCollision.time.toFixed(3), " moving to ", pos.toString(), " with normal ", earliestCollision.normal.toString());
+        stepMovement.sub(collisionAlongMovement);
+        const n = earliestCollision.normal;
+        pos.add(normalEpsilon.set(n.array).mul(epsilon))
+        if(n[1] > 0.5){
+          this.onground = true;
+        }
+
+        if(earliestCollision.time > 0.75){
+          // if we collided very late in the movement, we might want to just skip the rest of the movement to prevent jitter
+          break;
+        }
+        // slide!
+        // project remaining velocity onto collision normal
+        const remaining = stepMovement;
+
+        let dot = remaining.dot(n);
+
+        //check if dot is very small to prevent jitter when colliding at a very shallow angle
+        if (Math.abs(dot) < 1e-6) dot = 0;
+        // remove only the INTO-THE-WALL component
+        // (keep tangential component = slide)
+        stepMovement.set([
+          remaining.x - n.x * dot,
+          remaining.y - n.y * dot,
+          remaining.z - n.z * dot
+        ]);
+
+      }
+      if(stepCollided){
+        break;
+      }
+    
+    }
+
+    
+  }
+  checkCollisionWithVoxel(voxelAABB, pos, vel, normalOut = new vec3()) {  
+    const closestPos = new vec3();
+    console.log('velocity ', vel.toString());
+    // Get closest point + t along segment
+    const t = utils.getClosestPointToAABBAlongVelocity(voxelAABB, pos, vel, closestPos);
+
+    // Build AABB at exact closest point
+    const closestAABB = this.getAABB(closestPos);
+    console.log("Checking collision with voxel at ", voxelAABB.min.toString(), "-", voxelAABB.max.toString(), " closest point ", closestPos.toString(), " t ", t.toFixed(3));
+    // --- Step 1: check intersection FIRST (no backing yet) ---
+    if (!utils.aabbIntersect(closestAABB, voxelAABB)) {
+        console.log("No intersection at closest point, no collision.");
+        return false;
+    }
+    
+    const correctedAABBTime = utils.pushAABBOutOfVoxelAlongVelocityT(closestAABB, voxelAABB, vel, t, normalOut);
+    /*
+    // --- Step 3: compute penetration on backed position ---
+    const aMin = closestAABB.min;
+    const aMax = closestAABB.max;
+    const bMin = voxelAABB.min;
+    const bMax = voxelAABB.max;
+
+    const dx1 = bMax.x - aMin.x;
+    const dx2 = aMax.x - bMin.x;
+    const dy1 = bMax.y - aMin.y;
+    const dy2 = aMax.y - bMin.y;
+    const dz1 = bMax.z - aMin.z;
+    const dz2 = aMax.z - bMin.z;
+
+    let minPen = dy2;
+    normalOut.set([0, 1, 0]);
+
+    if (dx1 < minPen) { minPen = dx1; normalOut.set([-1, 0, 0]); }
+    if (dx2 < minPen) { minPen = dx2; normalOut.set([1, 0, 0]); }
+    
+    if (dy1 < minPen) { minPen = dy1; normalOut.set([0, -1, 0]); }
+
+    if (dz1 < minPen) { minPen = dz1; normalOut.set([0, 0, -1]); }
+    if (dz2 < minPen) { minPen = dz2; normalOut.set([0, 0, 1]); }
+
+    // --- Step 4: ensure normal opposes velocity ---
+    const dot =
+        normalOut.x * vel.x +
+        normalOut.y * vel.y +
+        normalOut.z * vel.z;
+
+    if (dot > 0) {
+        normalOut.x *= -1;
+        normalOut.y *= -1;
+        normalOut.z *= -1;
+    }
+    */
+   console.log("Collision detected! Corrected time: ", correctedAABBTime.toFixed(6), " normal: ", normalOut.toString());
+    return {
+        normal: normalOut,
+        time: correctedAABBTime
+    };
   }
   addWireframe(){
     this.wireframe = new WireframeModel(wireframeShader, new BoxWireframeMesh(this.size[0], this.size[1], this.size[2]), [0.8, 0.6, 0]);
@@ -3593,6 +3837,7 @@ class Camera {
     this.yaw = 0;
     this.pitch = 0;
     this.target = null;
+    this.person = 3; // 1 = first person, 2 = third person close, 3 = third person far
   }
   attach(entity) {
     if(this.target){
@@ -3620,7 +3865,27 @@ class Camera {
     return this.transform.position;
   }
   updateFromEntity(entity) {
-    this.transform.position.set(entity.transform.position);
+    if(this.person === 1){
+      // first person just matches entity position
+      this.transform.position.set(entity.transform.position);
+      return;
+    }
+    const distance = this.person === 2 ? 2 : 4; // how far back the camera is
+    const yaw = this.yaw;     // Range: -4.84 to -1.76
+    const pitch = this.pitch; // Range: -1.56 to 1.56 (clamped)
+
+    // Calculate offsets using radians directly
+    // Using -sin for X and -cos for Z is standard for a camera looking "forward" at yaw 0
+    const xOffset = distance * Math.cos(pitch) * Math.sin(yaw);
+    const yOffset = -distance * Math.sin(pitch); // Negative so positive pitch looks down
+    const zOffset = distance * Math.cos(pitch) * Math.cos(yaw);
+
+    // Apply to camera position
+    this.transform.position[0] = entity.transform.position[0] - xOffset;
+    this.transform.position[1] = entity.transform.position[1] + yOffset;
+    this.transform.position[2] = entity.transform.position[2] - zOffset;
+
+
   }
 }
 class Entity {
@@ -3635,9 +3900,9 @@ class Entity {
   }
 
   update(dt, debug = false) {
-    this.velocity.set([0,0,0]);
+    this.velocity.set(vec3.identity);
     if (this.controller) {
-      this.controller.update(this, dt);
+      this.controller.update(this);
     }
     if (this.collider) {
       this.collider.update(this, dt);
@@ -3664,6 +3929,13 @@ class Entity {
   setVelocity(vel) {
     this.velocity.set(vel);
   }
+
+  getPosition() {
+    return this.transform.position;
+  }
+  getVelocity() {
+    return this.velocity;
+  }
 }
 class PlayerController {
   constructor() {
@@ -3672,7 +3944,7 @@ class PlayerController {
   attach(entity) {
     entity.controller = this;
   }
-  update(entity, dt) {
+  update(entity) {
     const camera = entity.camera;
     const speed = entity.speed;
     this.velocity.set(entity.velocity);
@@ -4224,11 +4496,22 @@ const utils = {
   getChunkCacheAmount(renderDist){
     return 3*(renderDist*renderDist)+2000;
   },
+  aabbIntersect(a, b) {
+    return (
+        a.min.x < b.max.x && a.max.x > b.min.x &&
+        a.min.y < b.max.y && a.max.y > b.min.y &&
+        a.min.z < b.max.z && a.max.z > b.min.z
+    );
+  },
+  blockAABBVectors: {
+    min: new vec3(),
+    max: new vec3(),
+  },
   blockAABB(x, y, z) {
-    return {
-      min: [x, y, z],
-      max: [x + 1, y + 1, z + 1]
-    };
+    const {min, max} = this.blockAABBVectors;
+    min.set([x, y, z]);
+    max.set([x + 1, y + 1, z + 1]);
+    return this.blockAABBVectors;
   },
   getNeighborChunksForCollision(x, z) {
     const CHUNK_SIZE = 16;
@@ -4260,14 +4543,11 @@ const utils = {
       chunkCache.simpleGet(x1, z1)  // top-right
     ], blcx: x0, blcz: z0};
   },
-  getPotentialBlocks(aabb, neighborChunks, blcx, blcz) {
+  getPotentialBlocksInAABB(aabb, neighborChunks, blcx, blcz) {
     const bottomLeft = neighborChunks?.[0] || 0;
     const bottomRight = neighborChunks?.[1] || 0;
     const topLeft = neighborChunks?.[2] || 0;
     const topRight = neighborChunks?.[3] || 0;
-    if (!bottomLeft || !bottomRight || !topLeft || !topRight) {
-      return []; // missing chunk data, skip collision
-    }
     neighborChunks[0] = bottomLeft;
     neighborChunks[1] = bottomRight;
     neighborChunks[2] = topLeft;
@@ -4289,6 +4569,12 @@ const utils = {
         const chunkZ = Math.floor(z / 16)-bz;
         const index = chunkZ * 2 + chunkX;
         const chunk = neighborChunks[index];
+        
+        if(!chunk) {
+          console.warn('Chunk not found: ', chunk, ' index ', index, ' for x ', x, ' z ', z, ' chunkX ', chunkX, ' chunkZ ', chunkZ);
+          continue;
+        }
+        
         if(chunk===0) continue; // missing chunk data, skip
         for (let y = minY; y <= maxY; y++) {
           if(y<0 || y>=CHUNK_HEIGHT) continue; // out of world bounds
@@ -4303,72 +4589,221 @@ const utils = {
 
     return blocks;
   },
-  intersects(a, b) {
-    return (
-      a.min[0] < b.max[0] && a.max[0] > b.min[0] &&
-      a.min[1] < b.max[1] && a.max[1] > b.min[1] &&
-      a.min[2] < b.max[2] && a.max[2] > b.min[2]
-    );
-  },
-  resolveAxis(col, vel, pos, axis) {
-    const { neighborChunks, blcx, blcz } = utils.getNeighborChunksForCollision(pos[0], pos[2]);
+  pushAABBOutOfVoxelAlongVelocityT(collidingAABB, voxelAABB, vel, t, normalOut = new vec3()) {
 
-    const aabb = col.getAABB(pos);
-    const blocks = utils.getPotentialBlocks(aabb, neighborChunks, blcx, blcz);
-    const EPSILON = 0.001;
-    let bestCorrection = 0;
-    let found = false;
+    const aabb = collidingAABB;
 
-    for (const b of blocks) {
-      const blockBox = utils.blockAABB(b.x, b.y, b.z);
+    const aMin = aabb.min;
+    const aMax = aabb.max;
+    const bMin = voxelAABB.min;
+    const bMax = voxelAABB.max;
 
-      if (!utils.intersects(aabb, blockBox)) continue;
+    console.log('pushAABBOutOfVoxelAlongVelocityT called with aabb (', aMin.toString(), ' - ', aMax.toString(), ') voxelAABB (', bMin.toString(), ' - ', bMax.toString(), ') vel (', vel.toString(), ') t (', t, ')');
+    // convert world-space push into t-space correction
+    // current center position along velocity
+    const px = vel.x * t;
+    const py = vel.y * t;
+    const pz = vel.z * t;
 
-      let correction = 0;
+    let bestT = t; // we will reduce this
+
+    const epsilon = 0.0001;
+    const normal = normalOut;
+
+    // helper to test one axis
+    function solveAxis(axis) {
+      let v, p, aMinAxis, aMaxAxis, bMinAxis, bMaxAxis;
 
       if (axis === 0) {
-        if (vel[0] > 0) {
-          correction = blockBox.min[0] - aabb.max[0];
-        } else if (vel[0] < 0) {
-          correction = blockBox.max[0] - aabb.min[0];
-        }
+        v = vel.x; p = px;
+        aMinAxis = aMin.x; aMaxAxis = aMax.x;
+        bMinAxis = bMin.x; bMaxAxis = bMax.x;
+      } else if (axis === 1) {
+        v = vel.y; p = py;
+        aMinAxis = aMin.y; aMaxAxis = aMax.y;
+        bMinAxis = bMin.y; bMaxAxis = bMax.y;
+      } else {
+        v = vel.z; p = pz;
+        aMinAxis = aMin.z; aMaxAxis = aMax.z;
+        bMinAxis = bMin.z; bMaxAxis = bMax.z;
       }
 
-      if (axis === 1) {
-        if (vel[1] > 0) {
-          correction = blockBox.min[1] - aabb.max[1];
-        } else if (vel[1] < 0) {
-          correction = blockBox.max[1] - aabb.min[1];
-        }
+      if (Math.abs(v) < 1e-8) return;
+
+      let targetPos;
+
+      if (v > 0) {
+        // moving positive → we collided with voxel's min face
+        const pushDist = aMaxAxis - bMinAxis;
+        targetPos = p - pushDist - epsilon;
+      } else {
+        // moving negative → collided with voxel's max face
+        const pushDist = bMaxAxis - aMinAxis;
+        targetPos = p + pushDist + epsilon;
       }
 
-      if (axis === 2) {
-        if (vel[2] > 0) {
-          correction = blockBox.min[2] - aabb.max[2];
-        } else if (vel[2] < 0) {
-          correction = blockBox.max[2] - aabb.min[2];
-        }
-      }
+      // solve: velAxis * newT = targetPos
+      const newT = targetPos / v;
 
-      // We only care about corrections that push us OUT
-      if (correction === 0) continue;
-
-      // Pick the smallest magnitude correction (closest collision)
-      if (!found || Math.abs(correction) < Math.abs(bestCorrection)) {
-        bestCorrection = correction;
-        found = true;
-      }
-    }
-
-    if (found) {
-      pos[axis] += bestCorrection+EPSILON * Math.sign(bestCorrection);
-      vel[axis] = 0;
-
-      // Ground detection
-      if (axis === 1 && bestCorrection > 0) {
-        col.onGround = true;
+      if (newT >= 0 && newT <= bestT) {
+          bestT = newT;
+          if(v>0){
+            normal.set([-(axis===0), -(axis===1), -(axis===2)]);
+          }else{
+            normal.set([(axis===0), (axis===1), (axis===2)]);
+          }
       }
     }
+
+    // test all 3 axes
+    solveAxis(0);
+    solveAxis(1);
+    solveAxis(2);
+
+    // correction is how much we move backward
+    const newT = bestT;
+
+    console.log('MADE IT normal ', normal.toString(), '  new time  ', newT);
+
+    return Math.max(0, Math.min(1, newT)); // clamp and add small epsilon to prevent sticking
+  },
+  getClosestPointToAABBAlongVelocity(aabb, pos, vel, out){
+    const min = aabb.min; // vec3
+    const max = aabb.max; // vec3
+    console.log('getClosestPointToAABBAlongVelocity called with pos ', pos.toString(), ' vel ', vel.toString(), ' aabb min ', min.toString(), ' aabb max ', max.toString());
+    if (
+        pos[0] >= min[0] && pos[0] <= max[0] &&
+        pos[1] >= min[1] && pos[1] <= max[1] &&
+        pos[2] >= min[2] && pos[2] <= max[2]
+    ) {
+        console.warn(`Position ${pos.toString()} is already inside AABB {min: ${min.toString()}, max: ${max.toString()}}, returning original position`);
+        out.set(pos);
+        return 0.0; // already inside AABB
+    }
+
+    const dir = vel; // segment direction
+    let tMin = 0.0;
+    let tMax = 1.0;
+
+    // --- 1. Slab intersection test ---
+    for (let i = 0; i < 3; i++) {
+        if (Math.abs(dir[i]) < 1e-8) {
+            // Parallel to slab
+            if (pos[i] < min[i] || pos[i] > max[i]) {
+                tMin = 1.1; // force no hit
+                break;
+            }
+        } else {
+            const invD = 1.0 / dir[i];
+            let t1 = (min[i] - pos[i]) * invD;
+            let t2 = (max[i] - pos[i]) * invD;
+
+            if (t1 > t2) {
+                const tmp = t1;
+                t1 = t2;
+                t2 = tmp;
+            }
+
+            tMin = Math.max(tMin, t1);
+            tMax = Math.min(tMax, t2);
+
+            if (tMin > tMax) break;
+        }
+    }
+
+    // --- 2. If intersection exists ---
+    if (tMin <= tMax && tMin >= 0 && tMin <= 1) {
+        const hitPoint = [
+            pos[0] + dir[0] * tMin,
+            pos[1] + dir[1] * tMin,
+            pos[2] + dir[2] * tMin
+        ];
+        out.set(hitPoint);
+        return tMin;
+    }
+
+    // --- 3. Closest point (no intersection) ---
+
+    // Clamp segment endpoints to AABB
+    function clampPoint(p) {
+        return [
+            Math.max(min[0], Math.min(max[0], p[0])),
+            Math.max(min[1], Math.min(max[1], p[1])),
+            Math.max(min[2], Math.min(max[2], p[2]))
+        ];
+    }
+
+    const p0 = pos;
+    const p1 = [
+        pos[0] + dir[0],
+        pos[1] + dir[1],
+        pos[2] + dir[2]
+    ];
+
+    const c0 = clampPoint(p0);
+    const c1 = clampPoint(p1);
+
+    // Project closest point from AABB onto segment
+    function closestT(point) {
+        const v = dir;
+        const w = [
+            point[0] - pos[0],
+            point[1] - pos[1],
+            point[2] - pos[2]
+        ];
+
+        const lenSq = v[0]*v[0] + v[1]*v[1] + v[2]*v[2];
+        if (lenSq === 0) return 0;
+
+        let t = (w[0]*v[0] + w[1]*v[1] + w[2]*v[2]) / lenSq;
+        return Math.max(0, Math.min(1, t));
+    }
+
+    const t0 = closestT(c0);
+    const t1 = closestT(c1);
+
+    const cp0 = [
+        pos[0] + dir[0] * t0,
+        pos[1] + dir[1] * t0,
+        pos[2] + dir[2] * t0
+    ];
+
+    const cp1 = [
+        pos[0] + dir[0] * t1,
+        pos[1] + dir[1] * t1,
+        pos[2] + dir[2] * t1
+    ];
+
+    function distSq(a, b) {
+        const dx = a[0]-b[0];
+        const dy = a[1]-b[1];
+        const dz = a[2]-b[2];
+        return dx*dx + dy*dy + dz*dz;
+    }
+
+    const d0 = distSq(cp0, c0);
+    const d1 = distSq(cp1, c1);
+
+    if (d0 < d1) {
+        out.set(cp0)
+        return t0;
+    } else {
+        out.set(cp1)
+        return t1;
+    }
+  },
+  getSweptBroadphaseAABB(aabb, vel) {
+    aabb.min.set([
+      vel.x > 0 ? aabb.min.x : aabb.min.x + vel.x,
+      vel.y > 0 ? aabb.min.y : aabb.min.y + vel.y,
+      vel.z > 0 ? aabb.min.z : aabb.min.z + vel.z
+    ]);
+    aabb.max.set([
+      vel.x > 0 ? aabb.max.x + vel.x : aabb.max.x,
+      vel.y > 0 ? aabb.max.y + vel.y : aabb.max.y,
+      vel.z > 0 ? aabb.max.z + vel.z : aabb.max.z
+    ]);
+    return aabb;
   },
   log: function(text){
     const id = document.getElementById("console");
@@ -6123,7 +6558,8 @@ function render(time){
       camPos: "x: " + camera.transform.position[0].toFixed(2) + ", y: " + camera.transform.position[1].toFixed(2) + ", z: " + camera.transform.position[2].toFixed(2)+ " yaw: "+camera.yaw.toFixed(2)+" pitch: "+camera.pitch.toFixed(2),
       renderDist: camera.renderDist,
       camChunkPos: "cx: " + camChunkX + ", cz: " + camChunkZ + ", layer: "+camChunkLayer,
-      playerVelocity: player.velocity.map(v => v.toFixed(2)).join(", "),
+      playerVelocity: player.getVelocity().map(v => v.toFixed(2)).join(", "),
+      playerPosition: player.getPosition().map(v => v.toFixed(2)).join(", "),
       //total: ((chunkCache.get(camChunkX, camChunkZ)?.models?.[camChunkLayer]?.mesh?.TOTAL_VERTS || 0) + (chunkCache.get(camChunkX, camChunkZ)?.transparentModels?.[camChunkLayer]?.mesh?.TOTAL_VERTS || 0))/6,
       //chunkFaces: (chunkCache.get(camChunkX, camChunkZ)?.models?.[camChunkLayer]?.mesh?.TOTAL_VERTS || 0)/6,
       //transparentChunkFaces: (chunkCache.get(camChunkX, camChunkZ)?.transparentModels?.[camChunkLayer]?.mesh?.TOTAL_VERTS || 0)/6,
