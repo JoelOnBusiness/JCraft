@@ -1705,6 +1705,149 @@ class vec3 {
     return this.x*other[0] + this.y*other[1] + this.z*other[2];
   }
 }
+class AABB {
+  static minkowskiSumSize = new vec3();
+  min = new vec3();
+  max = new vec3();
+  constructor(size = [0,0,0], pos = [0,0,0]){
+    this.min.set([
+      pos[0] - size[0] / 2, 
+      pos[1] - size[1] / 2, 
+      pos[2] - size[2] / 2
+    ]);
+    this.max.set([
+      pos[0] + size[0] / 2,
+      pos[1] + size[1] / 2,
+      pos[2] + size[2] / 2
+    ]);
+  }
+  intersects(aabb){
+    return (
+        this.min.x < aabb.max.x && this.max.x > aabb.min.x &&
+        this.min.y < aabb.max.y && this.max.y > aabb.min.y &&
+        this.min.z < aabb.max.z && this.max.z > aabb.min.z
+    );
+  }
+  sweep(vel){
+    this.min.set([
+      vel.x > 0 ? this.min.x : this.min.x + vel.x,
+      vel.y > 0 ? this.min.y : this.min.y + vel.y,
+      vel.z > 0 ? this.min.z : this.min.z + vel.z
+    ]);
+    this.max.set([
+      vel.x > 0 ? this.max.x + vel.x : this.max.x,
+      vel.y > 0 ? this.max.y + vel.y : this.max.y,
+      vel.z > 0 ? this.max.z + vel.z : this.max.z
+    ]);
+    return this;
+  }
+  minkowskiSum(aabbB) {
+    // 1. Calculate the full size of the second AABB
+    const size = AABB.minkowskiSumSize;
+    size.set([
+        aabbB.max.x - aabbB.min.x,
+        aabbB.max.y - aabbB.min.y,
+        aabbB.max.z - aabbB.min.z
+    ]);
+
+    // 2. Expand AABB A by half of B's size in every direction
+    // This keeps the new AABB centered exactly where A was.
+    
+    this.min.set([
+        this.min.x - (size.x / 2),
+        this.min.y - (size.y / 2),
+        this.min.z - (size.z / 2)
+    ])
+    this.max.set([
+        this.max.x + (size.x / 2),
+        this.max.y + (size.y / 2),
+        this.max.z + (size.z / 2)
+    ])
+    return this;
+  }
+  set(size, pos, scale = 1){
+    const sx = size[0]*scale;
+    const sy = size[1]*scale;
+    const sz = size[2]*scale;
+    this.min.set([
+      pos[0] - sx / 2, 
+      pos[1] - sy / 2, 
+      pos[2] - sz / 2
+    ]);
+    this.max.set([
+      pos[0] + sx / 2,
+      pos[1] + sy / 2,
+      pos[2] + sz / 2
+    ]);
+    return this;
+  }
+  segmentIntersectT( pos, vel, normalOut = new vec3()) {
+    const min = this.min;
+    const max = this.max;
+
+    let tMin = 0.0;
+    let tMax = Infinity;
+
+    // Track which axis produced the entry time
+    let hitAxis = -1;
+
+    for (let i = 0; i < 3; i++) {
+        const p = i === 0 ? pos.x : i === 1 ? pos.y : pos.z;
+        const d = i === 0 ? vel.x : i === 1 ? vel.y : vel.z;
+        const minB = i === 0 ? min.x : i === 1 ? min.y : min.z;
+        const maxB = i === 0 ? max.x : i === 1 ? max.y : max.z;
+
+        if (Math.abs(d) < 1e-8) {
+            // Ray parallel to slab → must already be inside
+            if (p < minB || p > maxB) {
+                return false;
+            }
+            continue;
+        }
+
+        const invD = 1.0 / d;
+
+        let t1 = (minB - p) * invD;
+        let t2 = (maxB - p) * invD;
+
+        let enter = Math.min(t1, t2);
+        let exit  = Math.max(t1, t2);
+
+        // Track the axis that gives the latest entry (actual collision)
+        if (enter > tMin) {
+            tMin = enter;
+            hitAxis = i;
+        }
+
+        tMax = Math.min(tMax, exit);
+
+        if (tMin > tMax) {
+            return false;
+        }
+    }
+
+    if (tMin < 0 || tMin > 1) {
+        // starts inside or behind → treat as no valid forward hit
+        return false;
+    }
+
+    // --- compute normal ---
+    normalOut.set([0, 0, 0]);
+
+    if (hitAxis === 0) {
+        normalOut.x = vel.x > 0 ? -1 : 1;
+    } else if (hitAxis === 1) {
+        normalOut.y = vel.y > 0 ? -1 : 1;
+    } else if (hitAxis === 2) {
+        normalOut.z = vel.z > 0 ? -1 : 1;
+    }
+
+    return tMin;
+}
+  toString(){
+    return `AABB (min: ${this.min.toString()}, max: ${this.max.toString()})`;
+  }
+}
 class InputManager {
   constructor(canvas) {
     this.keys = new Uint8Array(256);
@@ -3624,23 +3767,10 @@ class BoxCollider {
     this.pos = new vec3();
     this.onground = false;
     this.vel = new vec3();
-    this.aabb = {min: new vec3(), max: new vec3()};
+    this.aabb = new AABB();
   }
   getAABB(pos, scale = 1) {
-    const sx = this.size[0]*scale;
-    const sy = this.size[1]*scale;
-    const sz = this.size[2]*scale;
-    this.aabb.min.set([
-      pos[0] - sx / 2, 
-      pos[1] - sy / 2, 
-      pos[2] - sz / 2
-    ]);
-    this.aabb.max.set([
-      pos[0] + sx / 2,
-      pos[1] + sy / 2,
-      pos[2] + sz / 2
-    ]);
-    return this.aabb;
+    return this.aabb.set(this.size, pos, scale);
   }
   update(entity, dt) {
     this.resolveCollisions(entity, dt);
@@ -3700,7 +3830,7 @@ class BoxCollider {
 
       for(let j = 0; j<maxIterationsPerStep; j++){ //allow multiple collision checks per step to handle corner cases like being pushed into a wall and then sliding along it
         console.log('---------- step iteration '+j+" ------------------")
-        const sweptAABB = utils.getSweptBroadphaseAABB(this.getAABB(pos), paddedStepMovement);
+        const sweptAABB = this.getAABB(pos).sweep(paddedStepMovement);
 
         const blocks = utils.getPotentialBlocksInAABB(sweptAABB, neighborChunks, blcx, blcz);
         
@@ -3725,13 +3855,13 @@ class BoxCollider {
 
         collisionAlongMovement.set(stepMovement.array).mul(earliestCollision.time);
         pos.add(collisionAlongMovement);
-        console.log("Collision at time ", earliestCollision.time.toFixed(3), " moving to ", pos.toString(), " with normal ", earliestCollision.normal.toString());
         stepMovement.sub(collisionAlongMovement);
         const n = earliestCollision.normal;
         pos.add(normalEpsilon.set(n.array).mul(epsilon))
         if(n[1] > 0.5){
           this.onground = true;
         }
+        console.log("Collision at time ", earliestCollision.time.toFixed(3), " moving to ", pos.toString(), " with normal ", earliestCollision.normal.toString());
 
         if(earliestCollision.time > 0.75){
           // if we collided very late in the movement, we might want to just skip the rest of the movement to prevent jitter
@@ -3763,6 +3893,29 @@ class BoxCollider {
     
   }
   checkCollisionWithVoxel(voxelAABB, pos, vel, normalOut = new vec3()) {  
+    const colliderAABB = this.getAABB(pos);
+    if(colliderAABB.intersects(voxelAABB)){
+      throw new Error(`Already colliding! colliderAABB: ${colliderAABB.toString()} voxelAABB: ${voxelAABB.toString()}`);
+      return {
+        normal: normalOut.identity(),
+        time: 0,
+      }
+    }
+    const collisionAABB = voxelAABB.minkowskiSum(colliderAABB);
+
+    const t = collisionAABB.segmentIntersectT(pos, vel, normalOut);
+
+    if(!t){
+      console.log("No intersection with block ",voxelAABB.min.map(x => x.toFixed(0).join(", "))," pos: ", pos.toString(), " vel: ", vel.toString(), " collisionAABB: ", collisionAABB.toString(), " no collision.");
+      return false;
+    };
+    console.log("Collision detected with block ",voxelAABB.min.map(x => x.toFixed(0).join(", ")),"! Corrected time: ", t.toFixed(6), " normal: ", normalOut.toString(), " pos: ", pos.toString(), " vel: ", vel.toString(), " collisionAABB ", collisionAABB.toString());
+    return {
+      normal: normalOut,
+      time: t
+    }
+
+    /*
     const closestPos = new vec3();
     console.log('velocity ', vel.toString());
     // Get closest point + t along segment
@@ -3815,11 +3968,13 @@ class BoxCollider {
         normalOut.z *= -1;
     }
     */
+   /*
    console.log("Collision detected! Corrected time: ", correctedAABBTime.toFixed(6), " normal: ", normalOut.toString());
     return {
         normal: normalOut,
         time: correctedAABBTime
     };
+    */
   }
   addWireframe(){
     this.wireframe = new WireframeModel(wireframeShader, new BoxWireframeMesh(this.size[0], this.size[1], this.size[2]), [0.8, 0.6, 0]);
@@ -4496,22 +4651,12 @@ const utils = {
   getChunkCacheAmount(renderDist){
     return 3*(renderDist*renderDist)+2000;
   },
-  aabbIntersect(a, b) {
-    return (
-        a.min.x < b.max.x && a.max.x > b.min.x &&
-        a.min.y < b.max.y && a.max.y > b.min.y &&
-        a.min.z < b.max.z && a.max.z > b.min.z
-    );
-  },
-  blockAABBVectors: {
-    min: new vec3(),
-    max: new vec3(),
-  },
+  blockAABBobj: new AABB(),
   blockAABB(x, y, z) {
-    const {min, max} = this.blockAABBVectors;
-    min.set([x, y, z]);
-    max.set([x + 1, y + 1, z + 1]);
-    return this.blockAABBVectors;
+    const aabb = utils.blockAABBobj;
+    aabb.min.set([x, y, z]);
+    aabb.max.set([x + 1, y + 1, z + 1]);
+    return aabb;
   },
   getNeighborChunksForCollision(x, z) {
     const CHUNK_SIZE = 16;
@@ -4791,19 +4936,6 @@ const utils = {
         out.set(cp1)
         return t1;
     }
-  },
-  getSweptBroadphaseAABB(aabb, vel) {
-    aabb.min.set([
-      vel.x > 0 ? aabb.min.x : aabb.min.x + vel.x,
-      vel.y > 0 ? aabb.min.y : aabb.min.y + vel.y,
-      vel.z > 0 ? aabb.min.z : aabb.min.z + vel.z
-    ]);
-    aabb.max.set([
-      vel.x > 0 ? aabb.max.x + vel.x : aabb.max.x,
-      vel.y > 0 ? aabb.max.y + vel.y : aabb.max.y,
-      vel.z > 0 ? aabb.max.z + vel.z : aabb.max.z
-    ]);
-    return aabb;
   },
   log: function(text){
     const id = document.getElementById("console");
