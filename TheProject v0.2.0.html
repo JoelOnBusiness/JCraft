@@ -1782,6 +1782,9 @@ class AABB {
     return this;
   }
   segmentIntersectT( pos, vel, normalOut = new vec3()) {
+    // --- compute normal ---
+    normalOut.identity();
+
     const min = this.min;
     const max = this.max;
 
@@ -1790,7 +1793,29 @@ class AABB {
 
     // Track which axis produced the entry time
     let hitAxis = -1;
+    function getAABBFaceNormal(normalOut = new vec3()){
 
+      const epsilon = 0.00001
+
+      // Check X faces
+      if (Math.abs(pos.x - min.x) < epsilon) normalOut.set([-1,0,0]);
+      if (Math.abs(pos.x - max.x) < epsilon) normalOut.set([1,0,0]);
+
+      // Check Y faces
+      if (Math.abs(pos.y - min.y) < epsilon) normalOut.set([0,-1,0]);
+      if (Math.abs(pos.y - max.y) < epsilon) normalOut.set([0,1,0]);
+
+      // Check Z faces
+      if (Math.abs(pos.z - min.z) < epsilon) normalOut.set([0,0,-1]);
+      if (Math.abs(pos.z - max.z) < epsilon) normalOut.set([0,0,1]);
+
+      if(normalOut.mag()>0){
+        return 0;
+      }
+      return false;
+
+    }
+    
     for (let i = 0; i < 3; i++) {
         const p = i === 0 ? pos.x : i === 1 ? pos.y : pos.z;
         const d = i === 0 ? vel.x : i === 1 ? vel.y : vel.z;
@@ -1800,7 +1825,7 @@ class AABB {
         if (Math.abs(d) < 1e-8) {
             // Ray parallel to slab → must already be inside
             if (p < minB || p > maxB) {
-                return false;
+                return getAABBFaceNormal(normalOut);
             }
             continue;
         }
@@ -1822,17 +1847,14 @@ class AABB {
         tMax = Math.min(tMax, exit);
 
         if (tMin > tMax) {
-            return false;
+            return getAABBFaceNormal(normalOut);
         }
     }
 
     if (tMin < 0 || tMin > 1) {
         // starts inside or behind → treat as no valid forward hit
-        return false;
+        return getAABBFaceNormal(normalOut);
     }
-
-    // --- compute normal ---
-    normalOut.set([0, 0, 0]);
 
     if (hitAxis === 0) {
         normalOut.x = vel.x > 0 ? -1 : 1;
@@ -3786,7 +3808,7 @@ class BoxCollider {
     entity.setVelocity(this.vel.array);
   }
   applyWorldCollisions(pos, vel, dt) {
-    const epsilon = 0.001;
+    const epsilon = 0.002;
     const totalMovementVec = new vec3().set(vel.array).mul(dt);
     const totalDistance = totalMovementVec.mag();
 
@@ -3816,7 +3838,6 @@ class BoxCollider {
         stepMovement.set(totalMovementVec.sub(stepMovement.mul(i)).array);
       }
       console.log('step velocity ', stepMovement.toString());
-      paddedStepMovement.set(stepMovement.array).mul(1.1);
       //find which chunks we need to check collisions in based on current position
       const currentQuadX = Math.floor(pos[0]/(CHUNK_SIZE/2));
       const currentQuadZ = Math.floor(pos[2]/(CHUNK_SIZE/2));
@@ -3830,6 +3851,7 @@ class BoxCollider {
 
       for(let j = 0; j<maxIterationsPerStep; j++){ //allow multiple collision checks per step to handle corner cases like being pushed into a wall and then sliding along it
         console.log('---------- step iteration '+j+" ------------------")
+        paddedStepMovement.set(stepMovement.array).mul(1.01);
         const sweptAABB = this.getAABB(pos).sweep(paddedStepMovement);
 
         const blocks = utils.getPotentialBlocksInAABB(sweptAABB, neighborChunks, blcx, blcz);
@@ -3904,12 +3926,12 @@ class BoxCollider {
     const collisionAABB = voxelAABB.minkowskiSum(colliderAABB);
 
     const t = collisionAABB.segmentIntersectT(pos, vel, normalOut);
-
-    if(!t){
-      console.log("No intersection with block ",voxelAABB.min.map(x => x.toFixed(0).join(", "))," pos: ", pos.toString(), " vel: ", vel.toString(), " collisionAABB: ", collisionAABB.toString(), " no collision.");
+    //if(t === 0) console.warn("edge case detected");
+    if(!t && t!==0){
+      console.log("No intersection with block ",voxelAABB.min.array.map(x => x.toFixed(0)).join(", ")," pos: ", pos.toString(), " vel: ", vel.toString(), " collisionAABB: ", collisionAABB.toString(), " no collision.");
       return false;
     };
-    console.log("Collision detected with block ",voxelAABB.min.map(x => x.toFixed(0).join(", ")),"! Corrected time: ", t.toFixed(6), " normal: ", normalOut.toString(), " pos: ", pos.toString(), " vel: ", vel.toString(), " collisionAABB ", collisionAABB.toString());
+    console.log("Collision detected with block ",voxelAABB.min.array.map(x => x.toFixed(0)).join(", "),"! Corrected time: ", t.toFixed(6), " normal: ", normalOut.toString(), " pos: ", pos.toString(), " vel: ", vel.toString(), " collisionAABB ", collisionAABB.toString());
     return {
       normal: normalOut,
       time: t
