@@ -3030,6 +3030,107 @@ class Chunk {
     return out;
   }
 }
+class BufferPool {
+  constructor() {
+    this.pool = [];
+    this.bufferSize = 0;
+  }
+
+  setBufferSize(size) {
+    this.bufferSize = size;
+  }
+
+  acquire() {
+    return this.pool.pop() || new ArrayBuffer(this.bufferSize);
+  }
+
+  release(buffer) {
+    this.pool.push(buffer);
+  }
+}
+class JobType {
+  static jobTypes = [];
+  static TYPE_MAP = {
+    Int8Array,
+    Uint8Array,
+    Uint8ClampedArray,
+    Int16Array,
+    Uint16Array,
+    Int32Array,
+    Uint32Array,
+    Float32Array,
+    Float64Array,
+  };
+  constructor(jobTypeId = JobType.jobTypes.length, layout) {
+    this.jobTypeId = jobTypeId;
+    while (JobType.jobTypes.length < jobTypeId+1){
+      JobType.jobTypes.push(null)
+    }
+    JobType.jobTypes[jobTypeId] = this;
+    if(layout){
+      this.layout = layout;
+      this.layoutKeys = Object.keys(layout);
+    }else{
+      this.layout = null;
+      this.layoutKeys = null;
+    }
+  }
+  configure(schema, taskQueue = new TaskQueue()) {
+    this.taskQueue = taskQueue;
+    this.dataBufferPool = new BufferPool();
+    this.totalByteSize = 0;
+    let offset = 0;
+    this.layout = {};
+    this.layoutKeys = [];
+    const ALIGN = 4;
+    const alignTo = (v, a) => (v + a - 1) & ~(a - 1);
+
+    for (const field of schema) {
+      const { key, type, length } = field;
+      this.layoutKeys.push(key);
+      const typeName = type.name; // "Float32Array", etc.
+      const bytesPerElement = type.BYTES_PER_ELEMENT;
+      const byteSize = bytesPerElement * length;
+
+      offset = alignTo(offset, ALIGN);
+
+      this.layout[key] = {
+        type: typeName,   // store string instead
+        length,
+        offset,
+        byteSize,
+      };
+
+      offset += byteSize;
+    }
+
+    this.totalByteSize = alignTo(offset, ALIGN);
+    this.dataBufferPool.setBufferSize(this.totalByteSize);
+  }
+  getBufferForTask(){
+    return this.dataBufferPool.acquire();
+  }
+  createViews(buffer){
+    return JobType.createViewsFromLayout(this.layout, buffer, this.layoutKeys);
+  }
+  static createViewsFromLayout(layout, buffer, layoutKeys = Object.keys(layout)){
+     const views = {};
+
+    for (const key of layoutKeys) {
+      const field = layout[key];
+
+      const Type = JobType.TYPE_MAP[field.type];
+
+      views[key] = new Type(
+        buffer,
+        field.offset,
+        field.length
+      );
+    }
+
+    return views;
+  }
+}
 class ChunkMesh {
   static VERTS_PER_SLOT = VERTS_PER_SLOT;
   constructor(baseVertexAllocation = 40000, shader) {
@@ -3318,6 +3419,7 @@ class TaskQueue {
   }
 
 }
+
 class WorkerPool {
   constructor(workerFactory, size, maxComplexity = 10) {
     this.workerFactory = workerFactory;
@@ -3338,7 +3440,6 @@ class WorkerPool {
       worker.onmessage = e => this._handleMessage(worker, e);
       worker.onerror = e => console.error("Worker error:", e);
       this.workers.push(worker);
-      this.waitingWorkers.push(worker);
     }
   }
 
@@ -3427,6 +3528,14 @@ class WorkerPool {
       //}
       //this.waitingWorkers.push(worker);
       //this._assignIfAvailable();
+      return;
+    }
+
+    if(type === 2){
+      worker.postMessage({
+        type: "init",
+        data: WorkerScript.getConfiguration()
+      });
       return;
     }
   }
@@ -3553,22 +3662,48 @@ class WorkerPool {
   }
 }
 class WorkerScript{
-  constructor(seed){
-     this.sampler = new ChunkSampler(seed);
+  constructor(){};
+  static getConfiguration(){
+    const jobTypes = [];
+    for ( const jobtype of JobType.jobTypes){
+      jobTypes.push({
+        jobTypeId: jobtype.jobTypeId,
+        layout: jobtype.layout
+      })
+    }
+    return {
+      seed: SEED,
+      jobTypes,
+      biomeData: { // match the worker code
+        contData: biome.contSpline.arr.slice(),
+        pvData: biome.pvSpline.arr.slice(),
+        squashingFactor: biome.squashingFactor,
+        offset: biome.offset
+      },
+    }
+  }
+  configure(data = WorkerScript.getConfiguration()){
+    this.sampler = new ChunkSampler(data.seed)
+    const jobTypes = data.jobTypes;
+    for(const jobtype of jobTypes){
+      new JobType(jobtype.jobTypeId, jobtype.layout);
+    }
+    const biomeData = data.biomeData;
+    const contSpline = new BiomeSpline(biomeData.contData);
+    const pvSpline   = new BiomeSpline(biomeData.pvData);
+    const biome = {
+      contSpline,
+      pvSpline,
+      squashingFactor: biomeData.squashingFactor,
+      offset: biomeData.offset
+    };
+    this.biome = biome;
   }
   processTask(e, jobType){
 
     if(jobType === "CG"){
-
-      const {cx, cz, blocks, blockPalette, biomeData, samplerData } = e;
-      const contSpline = new BiomeSpline(biomeData.contData);
-      const pvSpline   = new BiomeSpline(biomeData.pvData);
-      const biome = {
-        contSpline,
-        pvSpline,
-        squashingFactor: biomeData.squashingFactor,
-        offset: biomeData.offset
-      };
+      const {cx, cz, blocks, blockPalette} = e;
+      const biome = this.biome;
       const chunk = { cx, cz, blocks, blockPalette};
       this.sampler.sampleChunk(chunk, biome);
       return {data: {cx, cz, blocks, blockPalette}, transfer: [blocks.buffer, blockPalette.buffer]};
@@ -3639,8 +3774,11 @@ class WorkerScript{
 
       // ask for more work after finishing all tasks
       self.postMessage({ type: 0 });
+    }else if(msg.type === "init"){
+      this.configure(msg.data);
+      self.postMessage({type: 0});
     }
-}
+  }
 }
 class ChunkCache {
   constructor(limit = 256) {
@@ -4018,7 +4156,7 @@ class Camera {
     this.targetingPitch = 0;
     this.target = null;
     this.person = 3; // 1 = first person, 2 = third person close, 3 = third person far
-    this.collider = new BoxCollider(0.03, 0.03, 0.03, true);
+    this.collider = new BoxCollider(0.05, 0.05, 0.05, true);
   }
   static lookAt(cameraPos, targetPos){
     const dx = targetPos[0] - cameraPos[0];
@@ -4701,7 +4839,7 @@ const utils = {
     }
   },
   getChunkCacheAmount(renderDist){
-    return 3*(renderDist*renderDist)+2000;
+    return 4*(renderDist*renderDist)+3000;
   },
   blockAABBobj: new AABB(),
   blockAABB(x, y, z) {
@@ -6049,6 +6187,7 @@ const workerManager = {
   createWorker(seed) {
     // Convert dependent class definitions to strings
     const classDefs = [
+      JobType,
       Chunk,
       Perlin2D,
       Perlin3D,
@@ -6077,8 +6216,8 @@ const workerManager = {
       const textureAtlasInfo = ${JSON.stringify(textureAtlasInfo)};
       blockStates.processBlockList();
       blockModels.resolveAllModels();
-      const script = new WorkerScript(${seed});
-      self.postMessage({ type: 0 });
+      const script = new WorkerScript();
+      self.postMessage({ type: 2 });
       self.onmessage = (e) => {
         script.onmessage(e);
       }
@@ -6127,13 +6266,6 @@ const workerManager = {
       blocks: c.blocks,
       blockPalette: c.blockPalette,
       chunk: c,
-      biomeData: { // match the worker code
-        contData: biome.contSpline.arr.slice(),
-        pvData: biome.pvSpline.arr.slice(),
-        squashingFactor: biome.squashingFactor,
-        offset: biome.offset
-      },
-      samplerData: { seed: SEED } // pass only data needed to rebuild
     }
     try{
     const result = await this.centralWorkerPool.runTask("CG", data, [data.blocks.buffer, data.blockPalette.buffer]);
