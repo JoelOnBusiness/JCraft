@@ -64,7 +64,7 @@ const context = canvas.getContext("webgpu");
 canvas.width = window.innerWidth;
 canvas.height = window.innerHeight;
 let canvasWidth, canvasHeight;
-let renderPassDescriptor, depthView, device, opaqueShader, transparentShader, textShader, compressedUIShader, textRenderer, wireframeShader = null;
+let renderPassDescriptor, depthView, device, opaqueShader, transparentShader, textShader, compressedUIShader, textRenderer, wireframeShader, uPVUniformBuffer = null;
 let timestampQuerySet, timestampQueryAvailable = false, timestampResolveBuffer, timestampResultBuffer;
 let shadersLoaded = false;
 if (!navigator.gpu) {
@@ -142,6 +142,10 @@ function resizeCanvas() {
     }
   }
 async function loadShaders() {
+  uPVUniformBuffer = device.createBuffer({
+    size: 64, // 4x4 matrix
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+  });
   const alignTo16 = (size) => Math.ceil(size / 16) * 16;
   const vs =`
   struct GlobalUniforms {
@@ -296,10 +300,7 @@ async function loadShaders() {
         addressModeU: "clamp-to-edge", //Use "clamp-to-edge" to avoid texture bleeding. Use "repeat" if your UVs tile.
         addressModeV: "clamp-to-edge"
     });
-    shader.uPVUniformBuffer = device.createBuffer({
-      size: 64, // 4x4 matrix
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-    });
+    shader.uPVUniformBuffer = uPVUniformBuffer;
     shader.globalBindGroup = device.createBindGroup({
         layout: shader.pipeline.getBindGroupLayout(0),
         entries: [
@@ -677,10 +678,7 @@ async function loadShaders() {
         addressModeU: "clamp-to-edge", //Use "clamp-to-edge" to avoid texture bleeding. Use "repeat" if your UVs tile.
         addressModeV: "clamp-to-edge"
     });
-    shader.uPVUniformBuffer = device.createBuffer({
-      size: 64, // 4x4 matrix
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-    });
+    shader.uPVUniformBuffer = uPVUniformBuffer;
     shader.globalBindGroup = device.createBindGroup({
           layout: shader.pipeline.getBindGroupLayout(0),
           entries: [
@@ -1008,10 +1006,7 @@ async function loadShaders() {
         frontFace: "ccw"
       }
     });
-    shader.uPVUniformBuffer = device.createBuffer({
-      size: 64, // 4x4 matrix
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-    });
+    shader.uPVUniformBuffer = uPVUniformBuffer;
     shader.globalBindGroup = device.createBindGroup({
       layout: shader.pipeline.getBindGroupLayout(0),
       entries: [
@@ -1704,12 +1699,18 @@ class vec3 {
   dot(other){
     return this.x*other[0] + this.y*other[1] + this.z*other[2];
   }
+  mulVec(other){
+    this.array[0] *= other[0];
+    this.array[1] *= other[1];
+    this.array[2] *= other[2];
+  }
 }
 class AABB {
   static minkowskiSumSize = new vec3();
-  min = new vec3();
-  max = new vec3();
-  constructor(size = [0,0,0], pos = [0,0,0]){
+  constructor(size = [0,0,0], pos = [0,0,0], data = new Float32Array(6)){
+    this.data = data
+    this.min = new vec3(this.data.subarray(0, 3));
+    this.max = new vec3(this.data.subarray(3, 6));
     this.min.set([
       pos[0] - size[0] / 2, 
       pos[1] - size[1] / 2, 
@@ -1795,7 +1796,7 @@ class AABB {
     let hitAxis = -1;
     function getAABBFaceNormal(normalOut = new vec3()){
 
-      const epsilon = 0.00001
+      const epsilon = 0.0001
 
       // Check X faces
       if (Math.abs(pos.x - min.x) < epsilon) normalOut.set([-1,0,0]);
@@ -2237,11 +2238,12 @@ class NibbleArrayPool{
 }
 class Transform {
   constructor(matrix = null) {
-    this.position = new Float32Array([0,0,0]);
-    this.rotation = new Float32Array(3); // pitch (x), yaw (y), roll unused
-    this.scale    = new Float32Array([1, 1, 1]);
-
-    this.matrix = matrix || new Float32Array(16);
+    this.data = new Float32Array(3+3+3+(!matrix * 16))
+    this.position = this.data.subarray(0, 3);
+    this.rotation = this.data.subarray(3, 6); // pitch (x), yaw (y), roll unused
+    this.scale    = this.data.subarray(6, 9);
+    this.scale.set([1,1,1]);
+    this.matrix = matrix || this.data.subarray(9, 25);
     this.calculateMatrix();
   }
 
@@ -2551,7 +2553,8 @@ class Chunk {
     this.cz = 0;
     this.transform = new Transform();
     this.layerSize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
-    this.blocks = new Uint16Array(CHUNK_VOLUME);
+    this.blockPalette = new Uint16Array(255);
+    this.blocks = new Uint8Array(CHUNK_VOLUME);
     this.initializedModels = shadersLoaded;
     if(this.initializedModels){
       createChunkModels();
@@ -2594,6 +2597,7 @@ class Chunk {
 
     // Reset data (already optimal)
     this.blocks.fill(0);
+    this.blockPalette.fill(0);
     this.state.meshed.fill(false);
     this.state.queuedForMesh.fill(false);
     this.state.generated = false;
@@ -2612,6 +2616,7 @@ class Chunk {
     if(this.transparentModel) this.transparentModel.unload();
     this.transparentModel = null;
     this.blocks = null;
+    this.blockPalette = null;
     this.cx = null;
     this.cz = null;
     this.state = null;
@@ -2647,9 +2652,8 @@ class Chunk {
       z >= 0 && z < CHUNK_SIZE
     );
   }
-  static buildMesh( blocks, neighborSlices, layer) {
+  static buildMesh( blocks, blockPalette, neighborSlices, layer) {
     // Directions: [x,y,z], face name
-    //utils.log(utils.arrayToGridString(Object.values(neighborSlices), 1));
     const faces = [
       { dir: [ 0,  0,  1], name: "north"  },
       { dir: [ 0,  0, -1], name: "south"   },
@@ -2669,15 +2673,18 @@ class Chunk {
     let faceCount = 0;
     let transparentFaceCount = 0;
     // Count visible faces first
+    function getBlock(index){
+      if(blocks[index] === 0) return {tenBits: 0, sixBits: 0};
+      return converter.splitInt16(blockPalette[blocks[index]-1]);
+    }
     for (let y=CHUNK_SIZE-1; y>=0; y--)
     for (let x=0; x<CHUNK_SIZE; x++)
     for (let z=0; z<CHUNK_SIZE; z++){
-      const block = converter.splitInt16(blocks[Chunk.index(x,y,z)]);
+      const block = getBlock(Chunk.index(x,y,z));
       if (block.tenBits !== 0){
         block.tenBits -=1;
         const modelDetails = meshUtils.getModelDetailsObject(block.tenBits, block.sixBits);
         const rotFaces = meshUtils.getRotatedFaces(modelDetails.x,modelDetails.y);
-        //if(block.tenBits === 1) utils.log(JSON.stringify(rotFaces));
         const model = blockModels.resolvedModelData[modelDetails.m];
         model.elements.forEach(element => {
           for (const {dir, name} of faces) {
@@ -2694,15 +2701,17 @@ class Chunk {
             const nz = z + dir[2];
             let neighbor = 0;
             if (Chunk.inBounds(nx, ny, nz, true)) {
-              neighbor = blocks[Chunk.index(nx, ny, nz)];
-            }else if (dir[0] === 0 && dir[2]=== 0) {
-              neighbor = neighborSlices[name]? Chunk.getBlockFromYSlice(neighborSlices[name], x, z): 0; // vertical sides
-            } else if (dir[0] === 0) {
-              neighbor = Chunk.getBlockFromZSlice(neighborSlices[name], ny, x);
-            } else {
-              neighbor = Chunk.getBlockFromXSlice(neighborSlices[name], ny, z);
+              neighbor = getBlock(Chunk.index(nx, ny, nz));
+            }else {
+              if (dir[0] === 0 && dir[2]=== 0) {
+                neighbor = neighborSlices[name]? Chunk.getBlockFromYSlice(neighborSlices[name], x, z): 0; // vertical sides
+              } else if (dir[0] === 0) {
+                neighbor = Chunk.getBlockFromZSlice(neighborSlices[name], ny, x);
+              } else {
+                neighbor = Chunk.getBlockFromXSlice(neighborSlices[name], ny, z);
+              }
+              neighbor = converter.splitInt16(neighbor);
             }
-            neighbor = converter.splitInt16(neighbor);
             if(neighbor.tenBits === 0){
               elementFace.t > 0? transparentFaceCount++ : faceCount++;
               continue;
@@ -2752,7 +2761,7 @@ class Chunk {
     for (let y=CHUNK_SIZE-1; y>=0; y--) {
     for (let x = 0; x < CHUNK_SIZE; x++) {
     for (let z = 0; z < CHUNK_SIZE; z++) {
-      const block = converter.splitInt16(blocks[Chunk.index(x,y,z)]);
+      const block = getBlock(Chunk.index(x,y,z));
       if (block.tenBits !== 0){
         block.tenBits -=1;
         let skipBits = 0;
@@ -2810,15 +2819,17 @@ class Chunk {
             const nz = z + dir[2];
             let neighbor = 0;
             if (Chunk.inBounds(nx, ny, nz, true)) {
-              neighbor = blocks[Chunk.index(nx, ny, nz)];
-            } else if (dir[0] === 0 && dir[2]=== 0) {
-              neighbor = neighborSlices[name]? Chunk.getBlockFromYSlice(neighborSlices[name], x, z): 0; // vertical sides
-            } else if (dir[0] === 0) {
-              neighbor = Chunk.getBlockFromZSlice(neighborSlices[name], ny, x);
+              neighbor = getBlock(Chunk.index(nx, ny, nz));
             } else {
-              neighbor = Chunk.getBlockFromXSlice(neighborSlices[name], ny, z);
+              if (dir[0] === 0 && dir[2]=== 0) {
+                neighbor = neighborSlices[name]? Chunk.getBlockFromYSlice(neighborSlices[name], x, z): 0; // vertical sides
+              } else if (dir[0] === 0) {
+                neighbor = Chunk.getBlockFromZSlice(neighborSlices[name], ny, x);
+              } else {
+                neighbor = Chunk.getBlockFromXSlice(neighborSlices[name], ny, z);
+              }
+              neighbor = converter.splitInt16(neighbor);
             }
-            neighbor = converter.splitInt16(neighbor);
 
             if(neighbor.tenBits === 0){
               const {position, uv} = meshUtils.makeElementFace(elementCuboid[0], elementCuboid[1], elementFace, elementFaceSide.rot, name, x,y,z,tint);
@@ -2942,6 +2953,10 @@ class Chunk {
       if(data.transparentVertices.length > 0)this.transparentModel.mesh.updateMesh(layer, data.transparentVertices);
     }
   }
+  getBlock(index){
+    if(this.blocks[index] === 0)return 0;
+    return this.blockPalette[this.blocks[index]-1];
+  }
   getXSlice(x, layer) {
     // x should be 0 or CHUNK_SIZE - 1
     const slice = chunkAreaArrays.get();
@@ -2950,7 +2965,7 @@ class Chunk {
       for (let z = 0; z < CHUNK_SIZE; z++) {
         const srcIdx = y * (CHUNK_SIZE * CHUNK_SIZE) + z * CHUNK_SIZE + x;
         const dstIdx = (y-base) * CHUNK_SIZE + z;
-        slice[dstIdx] = this.blocks[srcIdx];
+        slice[dstIdx] = this.getBlock(srcIdx);
       }
     }
     return slice;
@@ -2963,7 +2978,7 @@ class Chunk {
       for (let x = 0; x < CHUNK_SIZE; x++) {
         const srcIdx = y * (CHUNK_SIZE * CHUNK_SIZE) + z * CHUNK_SIZE + x;
         const dstIdx = (y-base) * CHUNK_SIZE + x;
-        slice[dstIdx] = this.blocks[srcIdx];
+        slice[dstIdx] = this.getBlock(srcIdx);
       }
     }
     return slice;
@@ -2984,7 +2999,7 @@ class Chunk {
         for (let x = 0; x < CHUNK_SIZE; x++) {
           const srcIdx = y * (CHUNK_SIZE * CHUNK_SIZE) + z * CHUNK_SIZE + x;
           const dstIdx = z * CHUNK_SIZE + x;
-          slice[dstIdx] = this.blocks[srcIdx];
+          slice[dstIdx] = this.getBlock(srcIdx);
         }
       }
     }
@@ -3009,6 +3024,11 @@ class Chunk {
     const index = z * CHUNK_SIZE + x;
     return slice[index];
   }
+  getPalette(){
+    const out = chunkPaletteArrays.get();
+    out.set(this.blockPalette);
+    return out;
+  }
 }
 class ChunkMesh {
   static VERTS_PER_SLOT = VERTS_PER_SLOT;
@@ -3026,8 +3046,9 @@ class ChunkMesh {
     for(let i = 0; i<this.LAYERS; i++){
       this.meshSlots[i] = [];
     }
-    this.meshDataFirsts = new Uint16Array(this.LAYERS);
-    this.meshDataLasts = new Uint16Array(this.LAYERS);
+    this.meshData = new Uint16Array(this.LAYERS*2)
+    this.meshDataFirsts = this.meshData.subarray(0, this.LAYERS);
+    this.meshDataLasts = this.meshData.subarray(this.LAYERS, this.LAYERS*2);
     this.slotSizes = new Uint8Array(this.SLOT_COUNT);
     this.layersExist = new Uint8Array(this.LAYERS)
     this.nextSlot = 0;
@@ -3539,7 +3560,7 @@ class WorkerScript{
 
     if(jobType === "CG"){
 
-      const {cx, cz, blocks, biomeData, samplerData } = e;
+      const {cx, cz, blocks, blockPalette, biomeData, samplerData } = e;
       const contSpline = new BiomeSpline(biomeData.contData);
       const pvSpline   = new BiomeSpline(biomeData.pvData);
       const biome = {
@@ -3548,21 +3569,22 @@ class WorkerScript{
         squashingFactor: biomeData.squashingFactor,
         offset: biomeData.offset
       };
-      const chunk = { cx, cz, blocks};
+      const chunk = { cx, cz, blocks, blockPalette};
       this.sampler.sampleChunk(chunk, biome);
-      return {data: {cx, cz, blocks}, transfer: [blocks.buffer]};
+      return {data: {cx, cz, blocks, blockPalette}, transfer: [blocks.buffer, blockPalette.buffer]};
 
     }else if(jobType === "CM"){
 
-      const { blocks, slices, layer } = e;
+      const { blocks, blockPalette, slices, layer } = e;
       const {
         vertices,
         transparentVertices
-      } = Chunk.buildMesh(blocks, slices, layer);
+      } = Chunk.buildMesh(blocks, blockPalette, slices, layer);
 
       const data = {};
-      const transfer = [blocks.buffer, slices.east.buffer, slices.west.buffer, slices.north.buffer, slices.south.buffer, slices.up.buffer, slices.down.buffer];
+      const transfer = [blocks.buffer, blockPalette.buffer, slices.east.buffer, slices.west.buffer, slices.north.buffer, slices.south.buffer, slices.up.buffer, slices.down.buffer];
       data.blocks = blocks;
+      data.blockPalette = blockPalette;
       data.slices = slices;
       if (vertices) {
         data.vertices = vertices;
@@ -3734,6 +3756,34 @@ class ArrayPool {
     this.pool.push(array);
   }
 }
+class Uint8ArrayPool {
+  constructor(initialSize = 100, arraySize = CHUNK_VOLUME) {
+    this.pool = [];
+    this.arraySize = arraySize;
+    for (let i = 0; i < initialSize; i++) {
+      this.pool.push(new Uint8Array(arraySize));
+    }
+  }
+
+  setSize(size) {
+    const currentSize = this.pool.length;
+    if (size > currentSize) {
+      for (let i = currentSize; i < size; i++) {
+        this.pool.push(new Uint8Array(this.arraySize));
+      }
+    } else if (size < currentSize) {
+      this.pool.length = size;
+    }
+  }
+
+  get() {
+    return this.pool.pop() || new Uint8Array(this.arraySize);
+  }
+
+  release(array) {
+    this.pool.push(array);
+  }
+}
 class ChunkPool {
   constructor(initialSize = 10) {
     this.pool = [];
@@ -3784,28 +3834,38 @@ class ChunkPool {
   }
 }
 class BoxCollider {
-  constructor(width, height, depth) {
-    this.size = new Float32Array([width, height, depth]);
-    this.pos = new vec3();
+  constructor(width, height, depth, alwaysSlides = false) {
+    this.alwaysSlides = alwaysSlides;
+    this.data = new Float32Array(3+3+3+6);
+    this.size = this.data.subarray(0, 3);
+    this.size.set([width, height, depth]);
+    this.pos = new vec3(this.data.subarray(3,6));
     this.onground = false;
-    this.vel = new vec3();
-    this.aabb = new AABB();
+    this.vel = new vec3(this.data.subarray(6,9));
+    this.aabb = new AABB([0,0,0], [0,0,0], this.data.subarray(9, 15));
   }
   getAABB(pos, scale = 1) {
     return this.aabb.set(this.size, pos, scale);
   }
   update(entity, dt) {
-    this.resolveCollisions(entity, dt);
+    this.vel.set(entity.getVelocity());
+    this.pos.set(entity.getPosition());
+    this.resolveCollisions(this.pos, this.vel, dt);
+    entity.setPosition(this.pos.array);
+    entity.setVelocity(this.vel.array);
+  }
+  updateBasic(pos, vel, dt){
+    this.vel.set(vel.array);
+    this.pos.set(pos);
+    this.resolveCollisions(this.pos, this.vel, dt);
+    pos.set(this.pos.array);
+    if(this.slides) vel.set(this.vel.array);
   }
   attach(entity) {
     entity.collider = this;
   }
-  resolveCollisions(entity, dt) {
-    this.vel.set(entity.getVelocity());
-    this.pos.set(entity.getPosition());
-    this.applyWorldCollisions(this.pos, this.vel, dt);
-    entity.setPosition(this.pos.array);
-    entity.setVelocity(this.vel.array);
+  resolveCollisions(pos, vel, dt) {
+    this.applyWorldCollisions(pos, vel, dt);
   }
   applyWorldCollisions(pos, vel, dt) {
     const epsilon = 0.002;
@@ -3825,19 +3885,20 @@ class BoxCollider {
     const maxIterationsPerStep = 3;
     const paddedStepMovement = new vec3();
     const normalEpsilon = new vec3();
+    const normalMag = new vec3();
     let pastQuadrantX = null;
     let pastQuadrantZ = null;
     let pastChunks = {neighborChunks: [], blcx: null, blcz: null};
     let stepCollided = false;
     for(let i = 0; i<maxSteps; i++){ //Step through movement in increments of "step" to prevent tunneling through blocks
-      console.warn('step '+i+' of movement');
+      //console.warn('step '+i+' of movement');
       stepMovement.set(constantStepMovement.array);
       if(stepMovement.mag() > totalDistance) {
         stepMovement.set(totalMovementVec.array);
       }else if(i === maxSteps-1){
         stepMovement.set(totalMovementVec.sub(stepMovement.mul(i)).array);
       }
-      console.log('step velocity ', stepMovement.toString());
+      //console.log('step velocity ', stepMovement.toString());
       //find which chunks we need to check collisions in based on current position
       const currentQuadX = Math.floor(pos[0]/(CHUNK_SIZE/2));
       const currentQuadZ = Math.floor(pos[2]/(CHUNK_SIZE/2));
@@ -3850,8 +3911,8 @@ class BoxCollider {
       const {neighborChunks, blcx, blcz} = pastChunks;
 
       for(let j = 0; j<maxIterationsPerStep; j++){ //allow multiple collision checks per step to handle corner cases like being pushed into a wall and then sliding along it
-        console.log('---------- step iteration '+j+" ------------------")
-        paddedStepMovement.set(stepMovement.array).mul(1.01);
+        //console.log('---------- step iteration '+j+" ------------------")
+        paddedStepMovement.set(stepMovement.array).mul(1.001);
         const sweptAABB = this.getAABB(pos).sweep(paddedStepMovement);
 
         const blocks = utils.getPotentialBlocksInAABB(sweptAABB, neighborChunks, blcx, blcz);
@@ -3865,12 +3926,14 @@ class BoxCollider {
             if(collision.time < earliestCollision.time){
               earliestCollision.time = collision.time;
               earliestCollision.normal.set(collision.normal.array);
+            }else if (collision.time === 0 && earliestCollision.normal.mag() === 0){
+              earliestCollision.normal.set(collision.normal.array);
             }
           }
         }
         if(earliestCollision.time === 1) {
           pos.add(stepMovement);
-          console.log("No collision, moving full step to ", pos.toString());
+          //console.log("No collision, moving full step to ", pos.toString());
           break;
         }
         stepCollided = true;
@@ -3883,9 +3946,8 @@ class BoxCollider {
         if(n[1] > 0.5){
           this.onground = true;
         }
-        console.log("Collision at time ", earliestCollision.time.toFixed(3), " moving to ", pos.toString(), " with normal ", earliestCollision.normal.toString());
-
-        if(earliestCollision.time > 0.75){
+        //console.log("Collision at time ", earliestCollision.time.toFixed(3), " moving to ", pos.toString(), " with normal ", earliestCollision.normal.toString());
+        if(earliestCollision.time > 0.75 && !this.alwaysSlides){
           // if we collided very late in the movement, we might want to just skip the rest of the movement to prevent jitter
           break;
         }
@@ -3928,75 +3990,14 @@ class BoxCollider {
     const t = collisionAABB.segmentIntersectT(pos, vel, normalOut);
     //if(t === 0) console.warn("edge case detected");
     if(!t && t!==0){
-      console.log("No intersection with block ",voxelAABB.min.array.map(x => x.toFixed(0)).join(", ")," pos: ", pos.toString(), " vel: ", vel.toString(), " collisionAABB: ", collisionAABB.toString(), " no collision.");
+      //console.log("No intersection with block ",voxelAABB.min.array.map(x => x.toFixed(0)).join(", ")," pos: ", pos.toString(), " vel: ", vel.toString(), " collisionAABB: ", collisionAABB.toString(), " no collision.");
       return false;
     };
-    console.log("Collision detected with block ",voxelAABB.min.array.map(x => x.toFixed(0)).join(", "),"! Corrected time: ", t.toFixed(6), " normal: ", normalOut.toString(), " pos: ", pos.toString(), " vel: ", vel.toString(), " collisionAABB ", collisionAABB.toString());
+    //console.log("Collision detected with block ",voxelAABB.min.array.map(x => x.toFixed(0)).join(", "),"! Corrected time: ", t.toFixed(6), " normal: ", normalOut.toString(), " pos: ", pos.toString(), " vel: ", vel.toString(), " collisionAABB ", collisionAABB.toString());
     return {
       normal: normalOut,
       time: t
     }
-
-    /*
-    const closestPos = new vec3();
-    console.log('velocity ', vel.toString());
-    // Get closest point + t along segment
-    const t = utils.getClosestPointToAABBAlongVelocity(voxelAABB, pos, vel, closestPos);
-
-    // Build AABB at exact closest point
-    const closestAABB = this.getAABB(closestPos);
-    console.log("Checking collision with voxel at ", voxelAABB.min.toString(), "-", voxelAABB.max.toString(), " closest point ", closestPos.toString(), " t ", t.toFixed(3));
-    // --- Step 1: check intersection FIRST (no backing yet) ---
-    if (!utils.aabbIntersect(closestAABB, voxelAABB)) {
-        console.log("No intersection at closest point, no collision.");
-        return false;
-    }
-    
-    const correctedAABBTime = utils.pushAABBOutOfVoxelAlongVelocityT(closestAABB, voxelAABB, vel, t, normalOut);
-    /*
-    // --- Step 3: compute penetration on backed position ---
-    const aMin = closestAABB.min;
-    const aMax = closestAABB.max;
-    const bMin = voxelAABB.min;
-    const bMax = voxelAABB.max;
-
-    const dx1 = bMax.x - aMin.x;
-    const dx2 = aMax.x - bMin.x;
-    const dy1 = bMax.y - aMin.y;
-    const dy2 = aMax.y - bMin.y;
-    const dz1 = bMax.z - aMin.z;
-    const dz2 = aMax.z - bMin.z;
-
-    let minPen = dy2;
-    normalOut.set([0, 1, 0]);
-
-    if (dx1 < minPen) { minPen = dx1; normalOut.set([-1, 0, 0]); }
-    if (dx2 < minPen) { minPen = dx2; normalOut.set([1, 0, 0]); }
-    
-    if (dy1 < minPen) { minPen = dy1; normalOut.set([0, -1, 0]); }
-
-    if (dz1 < minPen) { minPen = dz1; normalOut.set([0, 0, -1]); }
-    if (dz2 < minPen) { minPen = dz2; normalOut.set([0, 0, 1]); }
-
-    // --- Step 4: ensure normal opposes velocity ---
-    const dot =
-        normalOut.x * vel.x +
-        normalOut.y * vel.y +
-        normalOut.z * vel.z;
-
-    if (dot > 0) {
-        normalOut.x *= -1;
-        normalOut.y *= -1;
-        normalOut.z *= -1;
-    }
-    */
-   /*
-   console.log("Collision detected! Corrected time: ", correctedAABBTime.toFixed(6), " normal: ", normalOut.toString());
-    return {
-        normal: normalOut,
-        time: correctedAABBTime
-    };
-    */
   }
   addWireframe(){
     this.wireframe = new WireframeModel(wireframeShader, new BoxWireframeMesh(this.size[0], this.size[1], this.size[2]), [0.8, 0.6, 0]);
@@ -4013,8 +4014,29 @@ class Camera {
     this.renderDist = initialRenderDist;
     this.yaw = 0;
     this.pitch = 0;
+    this.targetingYaw = 0;
+    this.targetingPitch = 0;
     this.target = null;
     this.person = 3; // 1 = first person, 2 = third person close, 3 = third person far
+    this.collider = new BoxCollider(0.03, 0.03, 0.03, true);
+  }
+  static lookAt(cameraPos, targetPos){
+    const dx = targetPos[0] - cameraPos[0];
+    const dy = targetPos[1] - cameraPos[1];
+    const dz = targetPos[2] - cameraPos[2];
+
+    // Horizontal distance (distance on the XZ plane)
+    const horizontalDist = Math.sqrt(dx * dx + dz * dz);
+
+    // Yaw: Angle on the XZ plane
+    // Math.atan2(x, z) gives 0 when looking forward (positive Z)
+    const yaw = Math.atan2(dx, dz);
+
+    // Pitch: Angle up or down
+    // dy is vertical, horizontalDist is the "adjacent" side
+    const pitch = Math.atan2(dy, horizontalDist);
+
+    return { yaw, pitch };
   }
   attach(entity) {
     if(this.target){
@@ -4025,9 +4047,9 @@ class Camera {
   }
   getViewMatrix(){
     // camera forward direction from yaw + pitch
-    const fx = Math.sin(this.yaw) * Math.cos(this.pitch);
-    const fy = Math.sin(this.pitch);
-    const fz = Math.cos(this.yaw) * Math.cos(this.pitch);
+    const fx = Math.sin(this.targetingYaw) * Math.cos(this.targetingPitch);
+    const fy = Math.sin(this.targetingPitch);
+    const fz = Math.cos(this.targetingYaw) * Math.cos(this.targetingPitch);
 
     const eye = this.transform.position;
     const center = new Float32Array([
@@ -4045,24 +4067,31 @@ class Camera {
     if(this.person === 1){
       // first person just matches entity position
       this.transform.position.set(entity.transform.position);
+      this.targetingPitch = this.pitch;
+      this.targetingYaw = this.yaw;
       return;
     }
     const distance = this.person === 2 ? 2 : 4; // how far back the camera is
-    const yaw = this.yaw;     // Range: -4.84 to -1.76
-    const pitch = this.pitch; // Range: -1.56 to 1.56 (clamped)
+    const yaw2 = this.yaw;     // Range: -4.84 to -1.76
+    const pitch2 = this.pitch; // Range: -1.56 to 1.56 (clamped)
 
     // Calculate offsets using radians directly
     // Using -sin for X and -cos for Z is standard for a camera looking "forward" at yaw 0
-    const xOffset = distance * Math.cos(pitch) * Math.sin(yaw);
-    const yOffset = -distance * Math.sin(pitch); // Negative so positive pitch looks down
-    const zOffset = distance * Math.cos(pitch) * Math.cos(yaw);
+    const xOffset = distance * Math.cos(pitch2) * Math.sin(yaw2);
+    const yOffset = distance * Math.sin(pitch2); // Negative so positive pitch looks down
+    const zOffset = distance * Math.cos(pitch2) * Math.cos(yaw2);
+
+    const vel = new vec3().set([-xOffset, -yOffset, -zOffset]);
 
     // Apply to camera position
-    this.transform.position[0] = entity.transform.position[0] - xOffset;
-    this.transform.position[1] = entity.transform.position[1] + yOffset;
-    this.transform.position[2] = entity.transform.position[2] - zOffset;
+    this.transform.position.set(entity.transform.position);
 
+    this.collider.updateBasic(this.transform.position, vel, 1);
 
+    const {yaw, pitch} = Camera.lookAt(this.transform.position, entity.transform.position);
+
+    this.targetingYaw = yaw;
+    this.targetingPitch = pitch;
   }
 }
 class Entity {
@@ -4658,8 +4687,9 @@ const utils = {
     const chunkCacheAmount = utils.getChunkCacheAmount(maxRenderDist);
     chunkCache.setSize(chunkCacheAmount);
     chunkPool.setSize(chunkCacheAmount+300); // Add some extra chunks to the pool
-    chunkVolumeArrays.setSize(chunkCacheAmount/8, CHUNK_SIZE*CHUNK_SIZE*CHUNK_SIZE);
-    chunkAreaArrays.setSize(chunkCacheAmount*6/8, CHUNK_SIZE*CHUNK_SIZE);
+    chunkVolumeArrays.setSize(chunkCacheAmount/8);
+    chunkPaletteArrays.setSize(chunkCacheAmount/8);
+    chunkAreaArrays.setSize(chunkCacheAmount*6/8);
     camera.renderDist = maxRenderDist;
     const camPos = camera.getPosition();
     const camChunkX = Math.floor(camPos[0]/CHUNK_SIZE);
@@ -4738,7 +4768,7 @@ const utils = {
         const chunk = neighborChunks[index];
         
         if(!chunk) {
-          console.warn('Chunk not found: ', chunk, ' index ', index, ' for x ', x, ' z ', z, ' chunkX ', chunkX, ' chunkZ ', chunkZ);
+          //console.warn('Chunk not found: ', chunk, ' index ', index, ' for x ', x, ' z ', z, ' chunkX ', chunkX, ' chunkZ ', chunkZ);
           continue;
         }
         
@@ -4755,209 +4785,6 @@ const utils = {
     }
 
     return blocks;
-  },
-  pushAABBOutOfVoxelAlongVelocityT(collidingAABB, voxelAABB, vel, t, normalOut = new vec3()) {
-
-    const aabb = collidingAABB;
-
-    const aMin = aabb.min;
-    const aMax = aabb.max;
-    const bMin = voxelAABB.min;
-    const bMax = voxelAABB.max;
-
-    console.log('pushAABBOutOfVoxelAlongVelocityT called with aabb (', aMin.toString(), ' - ', aMax.toString(), ') voxelAABB (', bMin.toString(), ' - ', bMax.toString(), ') vel (', vel.toString(), ') t (', t, ')');
-    // convert world-space push into t-space correction
-    // current center position along velocity
-    const px = vel.x * t;
-    const py = vel.y * t;
-    const pz = vel.z * t;
-
-    let bestT = t; // we will reduce this
-
-    const epsilon = 0.0001;
-    const normal = normalOut;
-
-    // helper to test one axis
-    function solveAxis(axis) {
-      let v, p, aMinAxis, aMaxAxis, bMinAxis, bMaxAxis;
-
-      if (axis === 0) {
-        v = vel.x; p = px;
-        aMinAxis = aMin.x; aMaxAxis = aMax.x;
-        bMinAxis = bMin.x; bMaxAxis = bMax.x;
-      } else if (axis === 1) {
-        v = vel.y; p = py;
-        aMinAxis = aMin.y; aMaxAxis = aMax.y;
-        bMinAxis = bMin.y; bMaxAxis = bMax.y;
-      } else {
-        v = vel.z; p = pz;
-        aMinAxis = aMin.z; aMaxAxis = aMax.z;
-        bMinAxis = bMin.z; bMaxAxis = bMax.z;
-      }
-
-      if (Math.abs(v) < 1e-8) return;
-
-      let targetPos;
-
-      if (v > 0) {
-        // moving positive → we collided with voxel's min face
-        const pushDist = aMaxAxis - bMinAxis;
-        targetPos = p - pushDist - epsilon;
-      } else {
-        // moving negative → collided with voxel's max face
-        const pushDist = bMaxAxis - aMinAxis;
-        targetPos = p + pushDist + epsilon;
-      }
-
-      // solve: velAxis * newT = targetPos
-      const newT = targetPos / v;
-
-      if (newT >= 0 && newT <= bestT) {
-          bestT = newT;
-          if(v>0){
-            normal.set([-(axis===0), -(axis===1), -(axis===2)]);
-          }else{
-            normal.set([(axis===0), (axis===1), (axis===2)]);
-          }
-      }
-    }
-
-    // test all 3 axes
-    solveAxis(0);
-    solveAxis(1);
-    solveAxis(2);
-
-    // correction is how much we move backward
-    const newT = bestT;
-
-    console.log('MADE IT normal ', normal.toString(), '  new time  ', newT);
-
-    return Math.max(0, Math.min(1, newT)); // clamp and add small epsilon to prevent sticking
-  },
-  getClosestPointToAABBAlongVelocity(aabb, pos, vel, out){
-    const min = aabb.min; // vec3
-    const max = aabb.max; // vec3
-    console.log('getClosestPointToAABBAlongVelocity called with pos ', pos.toString(), ' vel ', vel.toString(), ' aabb min ', min.toString(), ' aabb max ', max.toString());
-    if (
-        pos[0] >= min[0] && pos[0] <= max[0] &&
-        pos[1] >= min[1] && pos[1] <= max[1] &&
-        pos[2] >= min[2] && pos[2] <= max[2]
-    ) {
-        console.warn(`Position ${pos.toString()} is already inside AABB {min: ${min.toString()}, max: ${max.toString()}}, returning original position`);
-        out.set(pos);
-        return 0.0; // already inside AABB
-    }
-
-    const dir = vel; // segment direction
-    let tMin = 0.0;
-    let tMax = 1.0;
-
-    // --- 1. Slab intersection test ---
-    for (let i = 0; i < 3; i++) {
-        if (Math.abs(dir[i]) < 1e-8) {
-            // Parallel to slab
-            if (pos[i] < min[i] || pos[i] > max[i]) {
-                tMin = 1.1; // force no hit
-                break;
-            }
-        } else {
-            const invD = 1.0 / dir[i];
-            let t1 = (min[i] - pos[i]) * invD;
-            let t2 = (max[i] - pos[i]) * invD;
-
-            if (t1 > t2) {
-                const tmp = t1;
-                t1 = t2;
-                t2 = tmp;
-            }
-
-            tMin = Math.max(tMin, t1);
-            tMax = Math.min(tMax, t2);
-
-            if (tMin > tMax) break;
-        }
-    }
-
-    // --- 2. If intersection exists ---
-    if (tMin <= tMax && tMin >= 0 && tMin <= 1) {
-        const hitPoint = [
-            pos[0] + dir[0] * tMin,
-            pos[1] + dir[1] * tMin,
-            pos[2] + dir[2] * tMin
-        ];
-        out.set(hitPoint);
-        return tMin;
-    }
-
-    // --- 3. Closest point (no intersection) ---
-
-    // Clamp segment endpoints to AABB
-    function clampPoint(p) {
-        return [
-            Math.max(min[0], Math.min(max[0], p[0])),
-            Math.max(min[1], Math.min(max[1], p[1])),
-            Math.max(min[2], Math.min(max[2], p[2]))
-        ];
-    }
-
-    const p0 = pos;
-    const p1 = [
-        pos[0] + dir[0],
-        pos[1] + dir[1],
-        pos[2] + dir[2]
-    ];
-
-    const c0 = clampPoint(p0);
-    const c1 = clampPoint(p1);
-
-    // Project closest point from AABB onto segment
-    function closestT(point) {
-        const v = dir;
-        const w = [
-            point[0] - pos[0],
-            point[1] - pos[1],
-            point[2] - pos[2]
-        ];
-
-        const lenSq = v[0]*v[0] + v[1]*v[1] + v[2]*v[2];
-        if (lenSq === 0) return 0;
-
-        let t = (w[0]*v[0] + w[1]*v[1] + w[2]*v[2]) / lenSq;
-        return Math.max(0, Math.min(1, t));
-    }
-
-    const t0 = closestT(c0);
-    const t1 = closestT(c1);
-
-    const cp0 = [
-        pos[0] + dir[0] * t0,
-        pos[1] + dir[1] * t0,
-        pos[2] + dir[2] * t0
-    ];
-
-    const cp1 = [
-        pos[0] + dir[0] * t1,
-        pos[1] + dir[1] * t1,
-        pos[2] + dir[2] * t1
-    ];
-
-    function distSq(a, b) {
-        const dx = a[0]-b[0];
-        const dy = a[1]-b[1];
-        const dz = a[2]-b[2];
-        return dx*dx + dy*dy + dz*dz;
-    }
-
-    const d0 = distSq(cp0, c0);
-    const d1 = distSq(cp1, c1);
-
-    if (d0 < d1) {
-        out.set(cp0)
-        return t0;
-    } else {
-        out.set(cp1)
-        return t1;
-    }
   },
   log: function(text){
     const id = document.getElementById("console");
@@ -6062,9 +5889,14 @@ class ChunkSampler {
     this.caveDist = new Perlin2D(seed+90);
     this.overhangNoise = new fbmNoise3D(new Perlin3D(seed+7), 4, 2, 0.5, 0.03);
     const blockTypes = ["stone", "dirt", "bedrock", "glass", "oak_log", "oak_planks", "oak_leaves", "grass", "furnace", "grass_path", "oak_stairs", "oak_slab", "orange_carpet", "piston", "orange_stained_glass", "anvil"];
-    this.blockDictionary = {};
+    this.blockDictionary = {};     
+    this.tintedBlocks = []
     blockTypes.forEach(block => {
-      this.blockDictionary[block] = blockStates.blockList.indexOf(block)+1;
+      const index = blockStates.blockList.indexOf(block)+1;
+      this.blockDictionary[block] = index;
+      if(block.includes("grass") || block.includes("leaves")){
+        this.tintedBlocks.push(index);
+      }
     });
     this.maxTerrainHeight = 180;
   }
@@ -6075,17 +5907,36 @@ class ChunkSampler {
 
   sampleChunk(chunk, biome) {
     const blocks = chunk.blocks;
+    const blockPalette = chunk.blockPalette;
+    if(blockPalette.length ===0)throw new Error("blockPalette length is 0 in generation worker!")
+    let blockPaletteNext = 0;
     const erosionFloor = 40;
     const erosionCeil  = 140;
     const range = erosionCeil - erosionFloor;
     const blockDictionary = this.blockDictionary;
-    
+    const blockPaletteMap = new Map();
+
+    function addBlock(block){
+      const blockID = blockPaletteMap.get(block);
+      if(!blockID){
+        blockPaletteNext++;
+        blockPaletteMap.set(block, blockPaletteNext);
+        blockPalette[blockPaletteNext-1] = block;
+        return blockPaletteNext;
+      }
+      return blockID;
+    }
+      
+    const stone = addBlock(converter.combineToInt16(0, blockDictionary.stone));
+    const dirt = addBlock(converter.combineToInt16(0, blockDictionary.dirt))
+    const bedrock = addBlock(converter.combineToInt16(0,blockDictionary.bedrock));
     for (let x = 0; x < CHUNK_SIZE; x++) {
       for (let z = 0; z < CHUNK_SIZE; z++) {
         const worldX = chunk.cx * CHUNK_SIZE + x;
         const worldZ = chunk.cz * CHUNK_SIZE + z;
 
         const tint = Math.min(15, Math.max(0, Math.floor((this.temperature.sample(worldX, worldZ)+0.5)*16)));
+        
         if(tint === 0){
           console.log("check");
         }
@@ -6098,7 +5949,6 @@ class ChunkSampler {
           biome.contSpline.sample(cont) +
           biome.pvSpline.sample(peaks)
         );
-        const stone = converter.combineToInt16(0, blockDictionary.stone);
         for (let y = this.maxTerrainHeight-1; y >=1; y--) {
           const idx = this.index(x, y, z);
           if (y < height) {
@@ -6108,7 +5958,7 @@ class ChunkSampler {
           const density = this.overhangNoise.sample(worldX, y, worldZ);
           const squash = (y - height + biome.offset) / range;
           if (density > (squash * biome.squashingFactor)) {
-            blocks[idx] = converter.combineToInt16(converter.getMetaValue({tint: tint.toString()}, "leaves"), blockDictionary.oak_leaves); // stone overhang
+            blocks[idx] = addBlock(converter.combineToInt16(converter.getMetaValue({tint: tint.toString()}, "leaves"), blockDictionary.oak_leaves)); // stone overhang
             continue;
           }
           
@@ -6118,11 +5968,11 @@ class ChunkSampler {
         for (let y = this.maxTerrainHeight -2; y>=1; y--){
           const idx = this.index(x, y, z);
           if(blocks[this.index(x, y+1, z)] === 0 && blocks[idx] === stone){
-            blocks[idx] = converter.combineToInt16(converter.getMetaValue({snowy: "false", tint: tint.toString()}, "grass"), blockDictionary.grass);
+            blocks[idx] = addBlock(converter.combineToInt16(converter.getMetaValue({snowy: "false", tint: tint.toString()}, "grass"), blockDictionary.grass));
             for(let i = 1; i<6; i++){
               const idx = this.index(x, y-i, z);
               if(blocks[idx] === stone){
-                blocks[idx] = converter.combineToInt16(0, blockDictionary.dirt);
+                blocks[idx] = dirt;
               }
             }
             y-=5;
@@ -6133,10 +5983,11 @@ class ChunkSampler {
     this.caves.carveCavesForChunk(blocks, chunk.cx, chunk.cz, this.seed);
     for (let x = 0; x < CHUNK_SIZE; x++) {
       for (let z = 0; z < CHUNK_SIZE; z++) {
-        blocks[this.index(x, 0, z)] = converter.combineToInt16(0,blockDictionary.bedrock);
+        blocks[this.index(x, 0, z)] = bedrock;
       }
     }
     chunk.blocks = blocks;
+    chunk.blockPalette = blockPalette;
   }
 }
 // ===== Objects =====
@@ -6274,6 +6125,7 @@ const workerManager = {
       cx: cx,
       cz: cz,
       blocks: c.blocks,
+      blockPalette: c.blockPalette,
       chunk: c,
       biomeData: { // match the worker code
         contData: biome.contSpline.arr.slice(),
@@ -6284,11 +6136,12 @@ const workerManager = {
       samplerData: { seed: SEED } // pass only data needed to rebuild
     }
     try{
-    const result = await this.centralWorkerPool.runTask("CG", data, [data.blocks.buffer]);
+    const result = await this.centralWorkerPool.runTask("CG", data, [data.blocks.buffer, data.blockPalette.buffer]);
     if(result.error){
       utils.log("Chunk worker error: "+result.error);
     }else{
       c.blocks = result.blocks;
+      c.blockPalette = result.blockPalette;
       c.state.generated = true;
       chunkCache.set(cx, cz, c);
       this.queuedChunks.delete(utils.chunkKey(cx, cz));
@@ -6318,6 +6171,7 @@ const workerManager = {
           return;
         }
       }
+      const blockPalette = chunk.getPalette()
       // --- neighbors ---
       const nbs = Array(4);
       utils.getNeighborChunks(nbs, cx, cz);
@@ -6340,6 +6194,7 @@ const workerManager = {
       // --- transfer list (manual, fixed order) ---
       const transfer = [
         blocks.buffer,
+        blockPalette.buffer,
         slices.east.buffer,
         slices.west.buffer,
         slices.north.buffer,
@@ -6347,10 +6202,9 @@ const workerManager = {
         slices.up.buffer,
         slices.down.buffer
       ];
-
       const result = await this.centralWorkerPool.runTask(
         "CM",
-        { blocks, slices, cx, cz, layer },
+        { blocks, blockPalette, slices, cx, cz, layer },
         transfer
       );
 
@@ -6360,7 +6214,6 @@ const workerManager = {
         console.error("Chunk mesher error:", result.stack);
         return;
       }
-
       // --- release slices (manual, no Object.keys) ---
       let s;
 
@@ -6373,7 +6226,9 @@ const workerManager = {
 
       // --- release blocks ---
       chunkVolumeArrays.release(result.blocks);
+      chunkPaletteArrays.release(result.blockPalette);
       result.blocks = null;
+      result.blockPalette = null;
 
       // --- mesh creation ---
       chunk.createMesh(result, layer);
@@ -6430,8 +6285,9 @@ const initialRenderDist = 6;
 const chunkCacheAmount = utils.getChunkCacheAmount(initialRenderDist);
 const chunkCache = new ChunkCache(chunkCacheAmount);
 const chunkPool = new ChunkPool(chunkCacheAmount+initialRenderDist*initialRenderDist+300); // Add some extra chunks to the pool
-const chunkVolumeArrays = new ArrayPool(chunkCacheAmount/8, CHUNK_SIZE*CHUNK_SIZE*CHUNK_SIZE);
+const chunkVolumeArrays = new Uint8ArrayPool(chunkCacheAmount/8, CHUNK_SIZE*CHUNK_SIZE*CHUNK_SIZE);
 const chunkAreaArrays = new ArrayPool(chunkCacheAmount*6/8, CHUNK_SIZE*CHUNK_SIZE);
+const chunkPaletteArrays = new ArrayPool(chunkCacheAmount/8, 255);
 const camera = new Camera(initialRenderDist);
 const player = new Entity();
 player.transform.setPosition(0, 100, 0);
@@ -6631,9 +6487,11 @@ function render(time){
   const commandEncoder = device.createCommandEncoder();
   renderPassDescriptor.colorAttachments[0].view = context.getCurrentTexture().createView();
   const passEncoder = commandEncoder.beginRenderPass(renderPassDescriptor);
+
+  device.queue.writeBuffer(uPVUniformBuffer, 0, m);
+
   passEncoder.setPipeline(opaqueShader.pipeline);
   passEncoder.setBindGroup(0, opaqueShader.globalBindGroup);
-  device.queue.writeBuffer(opaqueShader.uPVUniformBuffer, 0, m);
   
   for (let c = 0; c < chunksToRender.length; c++) {
     const { cx, cz } = chunksToRender[c];
@@ -6679,7 +6537,6 @@ function render(time){
 
   passEncoder.setPipeline(transparentShader.pipeline);
   passEncoder.setBindGroup(0, transparentShader.globalBindGroup);
-  device.queue.writeBuffer(transparentShader.uPVUniformBuffer, 0, m);
 
   for(let i = transparentModelIndex-1; i>=0; i--){
     const {tModel, lowestLayer, highestLayer} = transparentModelsToDraw[i];
@@ -6691,7 +6548,6 @@ function render(time){
   if(debug.debugMode){
     passEncoder.setPipeline(wireframeShader.pipeline);
     passEncoder.setBindGroup(0, wireframeShader.globalBindGroup);
-    device.queue.writeBuffer(wireframeShader.uPVUniformBuffer, 0, m);
     for (let c = WireframeModel.models.length-1; c >=0; c--) {
       const wireframe = WireframeModel.models[c];
       wireframe.draw(passEncoder);
