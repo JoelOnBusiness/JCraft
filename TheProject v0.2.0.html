@@ -2553,7 +2553,7 @@ class Chunk {
     this.cz = 0;
     this.transform = new Transform();
     this.layerSize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
-    this.blockPalette = new Uint16Array(255);
+    this.blockPalette = new Uint16Array(256);
     this.blocks = new Uint8Array(CHUNK_VOLUME);
     this.initializedModels = shadersLoaded;
     if(this.initializedModels){
@@ -2653,7 +2653,7 @@ class Chunk {
     );
   }
   static buildMesh( blocks, blockPalette, neighborSlices, layer) {
-    // Directions: [x,y,z], face name
+    // Directions: [x,y,z], face name    
     const faces = [
       { dir: [ 0,  0,  1], name: "north"  },
       { dir: [ 0,  0, -1], name: "south"   },
@@ -2674,13 +2674,13 @@ class Chunk {
     let transparentFaceCount = 0;
     // Count visible faces first
     function getBlock(index){
-      if(blocks[index] === 0) return {tenBits: 0, sixBits: 0};
-      return converter.splitInt16(blockPalette[blocks[index]-1]);
+      return converter.splitInt16(blockPalette[blocks[index]]);
     }
     for (let y=CHUNK_SIZE-1; y>=0; y--)
     for (let x=0; x<CHUNK_SIZE; x++)
     for (let z=0; z<CHUNK_SIZE; z++){
       const block = getBlock(Chunk.index(x,y,z));
+      
       if (block.tenBits !== 0){
         block.tenBits -=1;
         const modelDetails = meshUtils.getModelDetailsObject(block.tenBits, block.sixBits);
@@ -2688,6 +2688,7 @@ class Chunk {
         const model = blockModels.resolvedModelData[modelDetails.m];
         model.elements.forEach(element => {
           for (const {dir, name} of faces) {
+            
             const elementFace = element.faces[rotFaces[name].dir];
             if(!elementFace) continue;
             const elementCullface = elementFace.cullface;
@@ -2953,64 +2954,84 @@ class Chunk {
       if(data.transparentVertices.length > 0)this.transparentModel.mesh.updateMesh(layer, data.transparentVertices);
     }
   }
-  getBlock(index){
-    if(this.blocks[index] === 0)return 0;
-    return this.blockPalette[this.blocks[index]-1];
+  getBlock(index) {
+    return this.blockPalette[this.blocks[index]];
   }
-  getXSlice(x, layer) {
-    // x should be 0 or CHUNK_SIZE - 1
-    const slice = chunkAreaArrays.get();
-    const base = layer * CHUNK_SIZE;
-    for (let y = base; y < base + CHUNK_SIZE; y++) {
-      for (let z = 0; z < CHUNK_SIZE; z++) {
-        const srcIdx = y * (CHUNK_SIZE * CHUNK_SIZE) + z * CHUNK_SIZE + x;
-        const dstIdx = (y-base) * CHUNK_SIZE + z;
-        slice[dstIdx] = this.getBlock(srcIdx);
+  getXSlice(x, layer, out) {
+    const slice = out;
+
+    const SIZE = CHUNK_SIZE;
+    const SIZE2 = SIZE * SIZE;
+    const baseY = layer * SIZE;
+
+    let dst = 0;
+
+    for (let ly = 0; ly < SIZE; ly++) {
+      let src = (baseY + ly) * SIZE2 + x;
+
+      for (let z = 0; z < SIZE; z++) {
+        slice[dst++] = this.blockPalette[this.blocks[src]];
+        src += SIZE;
       }
     }
+
     return slice;
   }
-  getZSlice(z, layer) {
-    // z should be 0 or CHUNK_SIZE - 1
-    const slice = chunkAreaArrays.get();
-    const base = layer * CHUNK_SIZE;
-    for (let y = base; y < base + CHUNK_SIZE; y++) {
-      for (let x = 0; x < CHUNK_SIZE; x++) {
-        const srcIdx = y * (CHUNK_SIZE * CHUNK_SIZE) + z * CHUNK_SIZE + x;
-        const dstIdx = (y-base) * CHUNK_SIZE + x;
-        slice[dstIdx] = this.getBlock(srcIdx);
+  getZSlice(z, layer, out) {
+    const slice = out;
+
+    const SIZE = CHUNK_SIZE;
+    const SIZE2 = SIZE * SIZE;
+    const baseY = layer * SIZE;
+    const zOffset = z * SIZE;
+
+    let dst = 0;
+
+    for (let ly = 0; ly < SIZE; ly++) {
+      let src = (baseY + ly) * SIZE2 + zOffset;
+
+      for (let x = 0; x < SIZE; x++) {
+        slice[dst++] = this.blockPalette[this.blocks[src++]];
       }
     }
+
     return slice;
   }
-  getYSlice(y, layer){
-    const slice = chunkAreaArrays.get();
-    const base = layer * CHUNK_SIZE;
-    y = y+base
-    if(y>=CHUNK_HEIGHT || y<0){
-      for (let z = 0; z < CHUNK_SIZE; z++) {
-        for (let x = 0; x < CHUNK_SIZE; x++) {
-          const dstIdx = z * CHUNK_SIZE + x;
-          slice[dstIdx] = 0;
-        }
-      }
-    }else{
-      for (let z = 0; z < CHUNK_SIZE; z++) {
-        for (let x = 0; x < CHUNK_SIZE; x++) {
-          const srcIdx = y * (CHUNK_SIZE * CHUNK_SIZE) + z * CHUNK_SIZE + x;
-          const dstIdx = z * CHUNK_SIZE + x;
-          slice[dstIdx] = this.getBlock(srcIdx);
-        }
-      }
+  getYSlice(y, layer, out) {
+    const slice = out;
+
+    const SIZE = CHUNK_SIZE;
+    const SIZE2 = SIZE * SIZE;
+
+    y += layer * SIZE;
+
+    if (y < 0 || y >= CHUNK_HEIGHT) {
+      slice.fill(0);
+      return slice;
     }
+
+    let src = y * SIZE2;
+    let dst = 0;
+
+    for (let i = 0; i < SIZE2; i++) {
+      slice[dst++] = this.blockPalette[this.blocks[src++]];
+    }
+
     return slice;
   }
-  getLayer(layer) {
+  getLayer(layer, out) {
+    const SIZE = CHUNK_SIZE;
+    const layerSize = SIZE * SIZE * SIZE;
+    const start = layer * layerSize;
+
+    out.set(this.blocks.subarray(start, start + layerSize));
+
+    return out;
+  }
+  getLayerView(layer){
     const layerSize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
     const start = layer * layerSize;
-    const out = chunkVolumeArrays.get();
-    out.set(this.blocks.subarray(start, start + layerSize));
-    return out;
+    return this.blocks.subarray(start, start + layerSize);
   }
   static getBlockFromXSlice(slice, y, z) {
     const index = y * CHUNK_SIZE + z;
@@ -3025,9 +3046,7 @@ class Chunk {
     return slice[index];
   }
   getPalette(){
-    const out = chunkPaletteArrays.get();
-    out.set(this.blockPalette);
-    return out;
+    return this.blockPalette;
   }
 }
 class BufferPool {
@@ -3061,7 +3080,8 @@ class JobType {
     Float32Array,
     Float64Array,
   };
-  constructor(jobTypeId = JobType.jobTypes.length, layout) {
+  constructor(jobTypeId = JobType.jobTypes.length, layout, workerFnName = "") {
+    if(workerFnName.length > 0) this.workerFnName = workerFnName;
     this.jobTypeId = jobTypeId;
     while (JobType.jobTypes.length < jobTypeId+1){
       JobType.jobTypes.push(null)
@@ -3070,13 +3090,16 @@ class JobType {
     if(layout){
       this.layout = layout;
       this.layoutKeys = Object.keys(layout);
+      this.viewFactory = JobType.compileViewFactory(this.layout, this.layoutKeys);
     }else{
       this.layout = null;
       this.layoutKeys = null;
+      this.viewFactory = new Function(`throw new Error("View Factory not compiled for jobTypeId ${this.jobTypeId} name ${this.jobName}")`);
     }
   }
-  configure(schema, taskQueue = new TaskQueue()) {
-    this.taskQueue = taskQueue;
+  configure(name, schema) {
+    this.jobName = name;
+    workerManager.jobs[name] = this;
     this.dataBufferPool = new BufferPool();
     this.totalByteSize = 0;
     let offset = 0;
@@ -3106,29 +3129,64 @@ class JobType {
 
     this.totalByteSize = alignTo(offset, ALIGN);
     this.dataBufferPool.setBufferSize(this.totalByteSize);
+    this.viewFactory = JobType.compileViewFactory(this.layout, this.layoutKeys);
   }
-  getBufferForTask(){
+  createTaskQueue(pool, options){
+    this.taskQueue = pool.addQueue(this.jobTypeId, options)
+  }
+  async _requestFn(job, data){
+    throw new Error ("Request Function not configured for jobType: ", this.jobTypeId, " name: ", this.jobName);
+  }
+  _prepareFn(job, data){
+    throw new Error ("Prepare Function not configured for jobType: ", this.jobTypeId, " name: ", this.jobName);
+  }
+  _cancelFn(job, taskData){
+    return;
+  }
+  async request(data){
+    return this._requestFn(this, data)
+  }
+  prepare(data){
+    return this._prepareFn(this, data)
+  }
+  cancel(taskData){
+    return this._cancelFn(this, taskData);
+  }
+  setRequest(fn) {
+    this._requestFn = fn;
+  }
+  setPrepare(fn) {
+    this._prepareFn = fn;
+  }
+  setCancel(fn){
+    this._cancelFn = fn;
+  }
+  setWorkerFunction(name, fn) {
+    this.workerFnName = name;
+    WorkerScript.workerFunctionRegistry.register(name, fn);
+  }
+  getBuffer(){
     return this.dataBufferPool.acquire();
   }
-  createViews(buffer){
-    return JobType.createViewsFromLayout(this.layout, buffer, this.layoutKeys);
+  releaseBuffer(buffer){
+    this.dataBufferPool.release(buffer);
   }
-  static createViewsFromLayout(layout, buffer, layoutKeys = Object.keys(layout)){
-     const views = {};
+  createViews(buffer){
+    return this.viewFactory(buffer);
+  }
+  static compileViewFactory(layout, keys) {
+    let src = "return {";
 
-    for (const key of layoutKeys) {
-      const field = layout[key];
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      const f = layout[key];
 
-      const Type = JobType.TYPE_MAP[field.type];
-
-      views[key] = new Type(
-        buffer,
-        field.offset,
-        field.length
-      );
+      src += `${key}: new JobType.TYPE_MAP["${f.type}"](buffer, ${f.offset}, ${f.length}),`;
     }
 
-    return views;
+    src += "}";
+
+    return new Function("buffer", src);
   }
 }
 class ChunkMesh {
@@ -3319,7 +3377,6 @@ class ChunkMesh {
 
     for (let i = start; i <= end; i++) {
       if (layers[i] === 0) continue;
-
       const f = firsts[i];
       const l = lasts[i];
 
@@ -3419,7 +3476,6 @@ class TaskQueue {
   }
 
 }
-
 class WorkerPool {
   constructor(workerFactory, size, maxComplexity = 10) {
     this.workerFactory = workerFactory;
@@ -3455,11 +3511,13 @@ class WorkerPool {
     this.taskQueues.set(jobType, queue);
     this.sortedQueues.push(queue);
     this.queuesDirty = true;
+    return queue;
   }
 
-  sortQueue(jobType, compareFn) {
-    const queue = this.taskQueues.get(jobType);
-    if (!queue) throw new Error(`No queue: ${jobType}`);
+  sortQueue(jobTypeName, compareFn) {
+    const jobTypeId = workerManager.jobs[jobTypeName].jobTypeId;
+    const queue = this.taskQueues.get(jobTypeId);
+    if (!queue) throw new Error(`No queue: ${jobTypeId} name: ${jobTypeName}`);
     queue.sort(compareFn);
   }
 
@@ -3473,7 +3531,7 @@ class WorkerPool {
   // TASK API
   // -------------------------
 
-  runTask(jobType, data, transfer = null) {
+  runTask(jobType, data) {
     const queue = this.taskQueues.get(jobType);
     if (!queue) {
       throw new Error(`No queue for jobType: ${jobType}`);
@@ -3482,7 +3540,7 @@ class WorkerPool {
     return new Promise((resolve, reject) => {
       const taskId = this.nextTaskId++;
 
-      queue.enqueue({ taskId, data, transfer });
+      queue.enqueue({ taskId, jobType, data});
       this.tasks.set(taskId, { resolve, reject });
 
       this._assignIfAvailable();
@@ -3530,12 +3588,8 @@ class WorkerPool {
       //this._assignIfAvailable();
       return;
     }
-
-    if(type === 2){
-      worker.postMessage({
-        type: "init",
-        data: WorkerScript.getConfiguration()
-      });
+    if (type === 2) {
+      worker.postMessage({type: "init", data: WorkerScript.getConfiguration()});
       return;
     }
   }
@@ -3569,12 +3623,13 @@ class WorkerPool {
         // dequeue as much as possible
         while (q.length !== 0 && complexityUsed + cost <= maxC) {
           const task = q.dequeue();
-          delete task.data.chunk;
+          const jobType = JobType.jobTypes[task.jobType];
+          const {data, transfer} = jobType.prepare(task.data);
           batch.push({
             taskId: task.taskId,
-            jobType: q.jobType,
-            data: task.data,
-            transfer: task.transfer
+            jobType: task.jobType,
+            data: data,
+            transfer: transfer
           });
 
           complexityUsed += cost;
@@ -3603,7 +3658,6 @@ class WorkerPool {
           }
         }
       }
-
       worker.postMessage(
         { type: "tasks", tasks: batch },
         transferables || undefined
@@ -3611,10 +3665,12 @@ class WorkerPool {
     }
   }
 
-  cancelTasks(jobType, predicate) {
+  cancelTasks(jobTypeName, predicate) {
     const cancelled = [];
-    const queue = this.taskQueues.get(jobType);
-    if (!queue) throw new Error(`No queue: ${jobType}`);
+    const jobType = workerManager.jobs[jobTypeName];
+    const jobTypeId = jobType.jobTypeId;
+    const queue = this.taskQueues.get(jobTypeId);
+    if (!queue) throw new Error(`No queue: ${jobTypeId} name: ${jobTypeName}`);
 
     queue.filter(item => {
       if (predicate(item.data)) {
@@ -3624,7 +3680,8 @@ class WorkerPool {
         // Reject the task's promise
         const task = this.tasks.get(taskId);
         if (task) {
-          task.reject("Task cancelled");
+          jobType.cancel(item.data);
+          task.resolve(null);
           this.tasks.delete(taskId);
         }
 
@@ -3638,11 +3695,9 @@ class WorkerPool {
     this.queuesDirty = true;
     return cancelled;
   }
-
   // -------------------------
   // CLEANUP
   // -------------------------
-
   terminate() {
     this.workers.forEach(w => w.terminate());
     this.workers.length = 0;
@@ -3650,11 +3705,10 @@ class WorkerPool {
     this.taskQueues.clear();
     this.tasks.clear();
   }
-
   describeQueues() {
     return [...this.taskQueues.values()]
       .map(q =>
-        `${q.jobType}: size=${q.length}, complexity=${q.complexity.toFixed(2)}`
+        `${q.jobType}: Job=${JobType.jobTypes[q.jobType].jobName} size=${q.length}, complexity=${q.complexity.toFixed(2)}`
       )
       .join(" | ").concat(" | Sorted: " +
         this.sortedQueues.map(q => `${q.jobType}(${q.effectivePriority.toFixed(2)})`).join(" > ")
@@ -3663,15 +3717,27 @@ class WorkerPool {
 }
 class WorkerScript{
   constructor(){};
+  static workerFunctionRegistry = {
+    map: {},
+
+    register(name, fn) {
+      this.map[name] = fn;
+    },
+
+    get(name) {
+      return this.map[name];
+    }
+  }
   static getConfiguration(){
     const jobTypes = [];
     for ( const jobtype of JobType.jobTypes){
       jobTypes.push({
         jobTypeId: jobtype.jobTypeId,
-        layout: jobtype.layout
+        layout: jobtype.layout,
+        workerFnName: jobtype.workerFnName
       })
     }
-    return {
+    const config = {
       seed: SEED,
       jobTypes,
       biomeData: { // match the worker code
@@ -3681,12 +3747,13 @@ class WorkerScript{
         offset: biome.offset
       },
     }
+    return config;
   }
   configure(data = WorkerScript.getConfiguration()){
-    this.sampler = new ChunkSampler(data.seed)
+    Object.freeze(WorkerScript.workerFunctionRegistry);
     const jobTypes = data.jobTypes;
     for(const jobtype of jobTypes){
-      new JobType(jobtype.jobTypeId, jobtype.layout);
+      new JobType(jobtype.jobTypeId, jobtype.layout, jobtype.workerFnName);
     }
     const biomeData = data.biomeData;
     const contSpline = new BiomeSpline(biomeData.contData);
@@ -3698,9 +3765,23 @@ class WorkerScript{
       offset: biomeData.offset
     };
     this.biome = biome;
+    this.sampler = new ChunkSampler(data.seed)
+    console.log("Worker Thread Temperature Permiation: ", this.sampler.temperature.noise.perm);
   }
   processTask(e, jobType){
+    const dataIn = e;
 
+    const name = JobType.jobTypes[jobType].workerFnName;
+
+    const fn = WorkerScript.workerFunctionRegistry.get(name);
+    const {data, transfer} = fn(this, jobType, dataIn);
+    
+    if(data){
+      return {data, transfer}
+    }else{
+      return false;
+    }
+    /*
     if(jobType === "CG"){
       const {cx, cz, blocks, blockPalette} = e;
       const biome = this.biome;
@@ -3738,7 +3819,9 @@ class WorkerScript{
       }
 
       return false;
+      
     }
+      */
   };
   onmessage(e) {
     const msg = e.data;
@@ -3752,19 +3835,20 @@ class WorkerScript{
 
           if (result?.transfer) {
             self.postMessage(
-              { type: 1, taskId, data: result.data },
+              { type: 1, jobType, taskId, data: result.data },
               result.transfer
             );
             //results.push({taskId, data: result.data});
             //transfer.concat(result.transfer);
           } else {
-            self.postMessage({ type: 1, taskId, data: result.data });
+            self.postMessage({ type: 1, jobType, taskId, data: result.data });
             //results.push({taskId, data: result.data})
           }
 
         } catch (err) {
           self.postMessage({
             type: 1,
+            jobType: msg.jobType,
             taskId,
             data: { error: err.message, stack: err.stack, taskId }
           });
@@ -3776,6 +3860,7 @@ class WorkerScript{
       self.postMessage({ type: 0 });
     }else if(msg.type === "init"){
       this.configure(msg.data);
+      console.log(this);
       self.postMessage({type: 0});
     }
   }
@@ -4825,9 +4910,6 @@ const utils = {
     const chunkCacheAmount = utils.getChunkCacheAmount(maxRenderDist);
     chunkCache.setSize(chunkCacheAmount);
     chunkPool.setSize(chunkCacheAmount+300); // Add some extra chunks to the pool
-    chunkVolumeArrays.setSize(chunkCacheAmount/8);
-    chunkPaletteArrays.setSize(chunkCacheAmount/8);
-    chunkAreaArrays.setSize(chunkCacheAmount*6/8);
     camera.renderDist = maxRenderDist;
     const camPos = camera.getPosition();
     const camChunkX = Math.floor(camPos[0]/CHUNK_SIZE);
@@ -5048,10 +5130,10 @@ const utils = {
     return Math.sqrt(dx*dx + dy*dy);
   },
   getNeighborSlices: function (out, east, west, north, south, layer) {
-    out[0] = east  ? east.getXSlice(0, layer)               : null;
-    out[1] = west  ? west.getXSlice(CHUNK_SIZE - 1, layer)  : null;
-    out[2] = north ? north.getZSlice(0, layer)              : null;
-    out[3] = south ? south.getZSlice(CHUNK_SIZE - 1, layer) : null;
+    east.getXSlice(0, layer, out[0]);
+    west.getXSlice(CHUNK_SIZE - 1, layer, out[1]);
+    north.getZSlice(0, layer, out[2]);
+    south.getZSlice(CHUNK_SIZE - 1, layer, out[3]);
   }, 
   dirs: [
     [ 0,  0,  1], // north
@@ -5071,18 +5153,21 @@ const utils = {
       out[i] = c
     }
   },
-  stringifyObjectWithFunctions: function (objName, obj) {
+  stringifyObjectWithFunctions: function (obj) {
     const entries = Object.entries(obj).map(([key, value]) => {
+      if(value === null) return key+': null';
       if (typeof value === "function") {
         const s = value.toString();
         return s?.split("{")?.[0]?.includes("function")? `${key}: ${s}` : s;
-      } else if (typeof value === "object") {
+      }else if (Array.isArray(value)){
         return `${key}: ${JSON.stringify(value)}`;
+      } else if (typeof value === "object") {
+        return `${key}: `+utils.stringifyObjectWithFunctions(value);
       } else {
         return `${key}: ${JSON.stringify(value)}`;
       }
     });
-    return `const ${objName} = { ${entries.join(",\n")} };`;
+    return `{${entries.join(",\n")} }`;
   },
   getAnyKey: function (obj) {
     for (let k in obj) return k; // minimal overhead
@@ -5571,7 +5656,7 @@ class Biome {
   }
 }
 class Perlin2D {
-  constructor(seed = 0) {
+  constructor(seed ) {
     this.seed = seed;
     this.perm = new Uint8Array(512);
     this.grad2 = [
@@ -5648,7 +5733,7 @@ class Perlin2D {
   }
 }
 class Perlin3D {
-  constructor(seed = 0) {
+  constructor(seed) {
     this.seed = seed;
     this.perm = new Uint8Array(512);
     this.grad3 = [
@@ -6016,25 +6101,21 @@ class CaveCarver{
 }
 class ChunkSampler {
   constructor(seed) {
-    this.seed = seed | 0;
+    this.seed = seed;
     // noises
-    this.contNoise   = new fbmNoise2D(new Perlin2D(seed),   4, 2.0, 0.5);
-    this.peaksNoise  = new fbmNoise2D(new Perlin2D(seed+4), 3, 2.0, 0.6, 0.02);
-    this.erosionNoise= new fbmNoise2D(new Perlin2D(seed+3), 2, 2.0, 0.5);
-    this.temperature= new fbmNoise2D(new Perlin2D(seed+8), 2, 2.0, 0.5, 0.003);
-    this.humidity = new fbmNoise2D(new Perlin2D(seed+9), 2, 2.0, 0.5,);
+    this.contNoise   = new fbmNoise2D(new Perlin2D(this.seed),   4, 2.0, 0.5);
+    this.peaksNoise  = new fbmNoise2D(new Perlin2D(this.seed+1), 3, 2.0, 0.6, 0.02);
+    this.erosionNoise= new fbmNoise2D(new Perlin2D(this.seed+2), 2, 2.0, 0.5);
+    this.temperature= new fbmNoise2D(new Perlin2D(this.seed+3), 2, 2.0, 0.5, 0.003);
+    this.humidity = new fbmNoise2D(new Perlin2D(this.seed+4), 2, 2.0, 0.5,);
     this.caves = new CaveCarver();
-    this.caveDist = new Perlin2D(seed+90);
-    this.overhangNoise = new fbmNoise3D(new Perlin3D(seed+7), 4, 2, 0.5, 0.03);
+    this.caveDist = new Perlin2D(this.seed+5);
+    this.overhangNoise = new fbmNoise3D(new Perlin3D(this.seed+6), 4, 2, 0.5, 0.03);
     const blockTypes = ["stone", "dirt", "bedrock", "glass", "oak_log", "oak_planks", "oak_leaves", "grass", "furnace", "grass_path", "oak_stairs", "oak_slab", "orange_carpet", "piston", "orange_stained_glass", "anvil"];
     this.blockDictionary = {};     
-    this.tintedBlocks = []
     blockTypes.forEach(block => {
       const index = blockStates.blockList.indexOf(block)+1;
       this.blockDictionary[block] = index;
-      if(block.includes("grass") || block.includes("leaves")){
-        this.tintedBlocks.push(index);
-      }
     });
     this.maxTerrainHeight = 180;
   }
@@ -6053,13 +6134,13 @@ class ChunkSampler {
     const range = erosionCeil - erosionFloor;
     const blockDictionary = this.blockDictionary;
     const blockPaletteMap = new Map();
-
+    blockPalette[0] = 0;
     function addBlock(block){
       const blockID = blockPaletteMap.get(block);
       if(!blockID){
         blockPaletteNext++;
         blockPaletteMap.set(block, blockPaletteNext);
-        blockPalette[blockPaletteNext-1] = block;
+        blockPalette[blockPaletteNext] = block;
         return blockPaletteNext;
       }
       return blockID;
@@ -6072,12 +6153,13 @@ class ChunkSampler {
       for (let z = 0; z < CHUNK_SIZE; z++) {
         const worldX = chunk.cx * CHUNK_SIZE + x;
         const worldZ = chunk.cz * CHUNK_SIZE + z;
-
         const tint = Math.min(15, Math.max(0, Math.floor((this.temperature.sample(worldX, worldZ)+0.5)*16)));
-        
         if(tint === 0){
-          console.log("check");
+         // console.log("check");
         }
+        
+        const leaves = addBlock(converter.combineToInt16(converter.getMetaValue({tint: tint.toString()}, "leaves"), blockDictionary.oak_leaves)); // stone overhang
+        const grass = addBlock(converter.combineToInt16(converter.getMetaValue({snowy: "false", tint: tint.toString()}, "grass"), blockDictionary.grass));
 
         // sample 2D noises for terrain height
         const cont = this.contNoise.sample(worldX, worldZ);
@@ -6096,7 +6178,7 @@ class ChunkSampler {
           const density = this.overhangNoise.sample(worldX, y, worldZ);
           const squash = (y - height + biome.offset) / range;
           if (density > (squash * biome.squashingFactor)) {
-            blocks[idx] = addBlock(converter.combineToInt16(converter.getMetaValue({tint: tint.toString()}, "leaves"), blockDictionary.oak_leaves)); // stone overhang
+            blocks[idx] = leaves;
             continue;
           }
           
@@ -6106,7 +6188,7 @@ class ChunkSampler {
         for (let y = this.maxTerrainHeight -2; y>=1; y--){
           const idx = this.index(x, y, z);
           if(blocks[this.index(x, y+1, z)] === 0 && blocks[idx] === stone){
-            blocks[idx] = addBlock(converter.combineToInt16(converter.getMetaValue({snowy: "false", tint: tint.toString()}, "grass"), blockDictionary.grass));
+            blocks[idx] = grass;
             for(let i = 1; i<6; i++){
               const idx = this.index(x, y-i, z);
               if(blocks[idx] === stone){
@@ -6184,7 +6266,8 @@ const debug = {
 const workerManager = {
   workers: Math.min(10, Math.max(threadCapacity-1, 1)),
   queuedChunks: new Set(),
-  createWorker(seed) {
+  workerCode: "",
+  createWorkerCode(){
     // Convert dependent class definitions to strings
     const classDefs = [
       JobType,
@@ -6198,8 +6281,6 @@ const workerManager = {
       ChunkSampler,
       WorkerScript
     ].map(fn => fn.toString()).join('\n\n');
-    const converterCode = utils.stringifyObjectWithFunctions("converter", converter);
-    const meshUtilsCode = utils.stringifyObjectWithFunctions("meshUtils", meshUtils);
     // Inline worker code
     const workerCode = `
       const CHUNK_SIZE = ${CHUNK_SIZE};
@@ -6208,37 +6289,134 @@ const workerManager = {
         ${utils.clamp.toString()}
       };
       const BLOCK_META_LAYOUTS = ${JSON.stringify(BLOCK_META_LAYOUTS)};
-      ${utils.stringifyObjectWithFunctions("blockStates", blockStates)}
-      ${converterCode}
+      const blockStates = ${utils.stringifyObjectWithFunctions(blockStates)};
+      const converter = ${utils.stringifyObjectWithFunctions(converter)};
       ${classDefs}
-      ${meshUtilsCode}
-      ${utils.stringifyObjectWithFunctions("blockModels", blockModels)}
+      const meshUtils = ${utils.stringifyObjectWithFunctions(meshUtils)};
+      const blockModels = ${utils.stringifyObjectWithFunctions( blockModels)}
       const textureAtlasInfo = ${JSON.stringify(textureAtlasInfo)};
       blockStates.processBlockList();
       blockModels.resolveAllModels();
+      const workerFunctions = ${utils.stringifyObjectWithFunctions(WorkerScript.workerFunctionRegistry)}
+      WorkerScript.workerFunctionRegistry = workerFunctions;
       const script = new WorkerScript();
       self.postMessage({ type: 2 });
       self.onmessage = (e) => {
         script.onmessage(e);
       }
-     `
-
+     `;
+     workerManager.workerCode = workerCode;
+  },
+  createWorker() {
     // Create worker from blob
-    const blob = new Blob([workerCode], { type: "application/javascript" });
+    const blob = new Blob([workerManager.workerCode], { type: "application/javascript" });
     return new Worker(URL.createObjectURL(blob));
   },
   centralWorkerPool: null,
+  jobs: {},
   initialize() {
     const pool = new WorkerPool(this.createWorker, this.workers, 9 + Math.floor(this.workers/2))
-    pool.addQueue("CG", {
+    workerManager.centralWorkerPool = pool;
+    const cgJob = new JobType();
+    cgJob.configure("CG", [
+      {key: "blockPalette", type: Uint16Array, length: 256},
+      {key: "cx", type: Int32Array, length: 1},
+      {key: "cz", type: Int32Array, length: 1},
+    ])
+    cgJob.createTaskQueue(pool, {
       priority: 5,
       complexity: 9.25 - this.workers*0.125,
       priorityScale: len => {
         if (len < 20) return 3;   // deprioritize
         return 5;   // ramp up when backlog grows
       }
+    })
+    cgJob.setRequest(async function (job, dataIn){
+      const {cx, cz} = dataIn;
+      const key = utils.chunkKey(cx, cz);
+      if(workerManager.queuedChunks.has(key)) return;
+      const c = chunkPool.get();
+      if(!c){
+        console.warn("Failed to get chunk for generation at "+cx+", "+cz);
+        console.log("Pool status: ", chunkPool, "Cache status: ", chunkCache);
+      }
+      c.resetData(cx, cz);
+      const dataOut = {
+        cx: cx,
+        cz: cz,
+        chunk: c,
+      }
+      workerManager.queuedChunks.add(key);
+      const result = await workerManager.centralWorkerPool.runTask(job.jobTypeId, dataOut);
+      if(!result) return;
+      if(result.error){
+        throw new Error("Chunk worker error: "+result.error+" stack: "+result.stack+" jobtype: "+result.jobType);
+      }else{
+
+        const {blocks, buffer} = result;
+        const views = job.createViews(buffer);
+        const blockPalette = views.blockPalette;
+        const cx = views.cx[0];
+        const cz = views.cz[0];
+        const chunk = c;
+        chunk.blocks = blocks;
+        chunk.blockPalette.set(blockPalette);
+        chunk.state.generated = true;
+
+        job.releaseBuffer(buffer);
+
+        chunkCache.set(cx, cz, chunk);
+        workerManager.queuedChunks.delete(utils.chunkKey(cx, cz));
+        chunksGenerated++;
+        workerManager.tryQueueForMeshing(cx, cz, chunk);
+      }
     });
-    pool.addQueue("CM", (() => {
+    cgJob.setPrepare(function (job, dataIn){
+      const {cx, cz, chunk} = dataIn
+      const buffer = job.getBuffer();
+      const views = job.createViews(buffer);
+      views.blockPalette.set(chunk.blockPalette);
+      views.cx[0] = cx;
+      views.cz[0] = cz;
+      const blocks = chunk.blocks;
+      const data = {
+        blocks,
+        buffer
+      };
+      const transfer = [buffer, blocks.buffer];
+      return {data, transfer};
+    })
+    cgJob.setWorkerFunction("CG", function (script = new WorkerScript(), jobType, dataIn){
+      const {blocks, buffer} = dataIn;
+      const views = JobType.jobTypes[jobType].createViews(buffer);
+      const blockPalette = views.blockPalette;
+      const cx = views.cx[0];
+      const cz = views.cz[0];
+      const biome = script.biome;
+      const chunk = { cx, cz, blocks, blockPalette};
+      script.sampler.sampleChunk(chunk, biome);
+      return {data: {blocks, buffer}, transfer: [blocks.buffer, buffer]};
+
+    })
+    cgJob.setCancel(function (job, taskData){
+      workerManager.queuedChunks.delete(utils.chunkKey(taskData.cx, taskData.cz));
+      if(taskData.chunk) chunkPool.release(taskData.chunk);
+    })
+    const cmJob = new JobType();
+    cmJob.configure("CM", [
+      {key: "blocks", type: Uint8Array, length: CHUNK_SIZE*CHUNK_SIZE*CHUNK_SIZE},
+      {key: "blockPalette", type: Uint16Array, length: 256},
+      {key: "sliceNorth", type: Uint16Array, length: CHUNK_SIZE*CHUNK_SIZE},
+      {key: "sliceSouth", type: Uint16Array, length: CHUNK_SIZE*CHUNK_SIZE},
+      {key: "sliceEast", type: Uint16Array, length: CHUNK_SIZE*CHUNK_SIZE},
+      {key: "sliceWest", type: Uint16Array, length: CHUNK_SIZE*CHUNK_SIZE},
+      {key: "sliceUp", type: Uint16Array, length: CHUNK_SIZE*CHUNK_SIZE},
+      {key: "sliceDown", type: Uint16Array, length: CHUNK_SIZE*CHUNK_SIZE},
+      {key: "cx", type: Int32Array, length: 1},
+      {key: "cz", type: Int32Array, length: 1},
+      {key: "layer", type: Uint32Array, length: 1},
+    ])
+    cmJob.createTaskQueue(pool, (() => {
       let high = false;
       return {
         priority: 3,
@@ -6250,135 +6428,102 @@ const workerManager = {
         }
       };
     })());
-    pool.initialize();
-    this.centralWorkerPool = pool;
-  },
-  requestChunkGeneration: async function (cx, cz){
-    const c = chunkPool.get(cx, cz);
-    if(!c){
-      console.warn("Failed to get chunk for generation at "+cx+", "+cz);
-      console.log("Pool status: ", chunkPool, "Cache status: ", chunkCache);
-    }
-    c.resetData(cx, cz);
-    const data = {
-      cx: cx,
-      cz: cz,
-      blocks: c.blocks,
-      blockPalette: c.blockPalette,
-      chunk: c,
-    }
-    try{
-    const result = await this.centralWorkerPool.runTask("CG", data, [data.blocks.buffer, data.blockPalette.buffer]);
-    if(result.error){
-      utils.log("Chunk worker error: "+result.error);
-    }else{
-      c.blocks = result.blocks;
-      c.blockPalette = result.blockPalette;
-      c.state.generated = true;
-      chunkCache.set(cx, cz, c);
-      this.queuedChunks.delete(utils.chunkKey(cx, cz));
-      chunksGenerated++;
-      this.tryQueueForMeshing(cx, cz, c);
-    }
-    }catch (err){
-      return;
-    }
-  },
-  requestChunkMeshing: async function (chunk, layer) {
-    const state = chunk.state;
-    const cx = chunk.cx;
-    const cz = chunk.cz;
-
-    try {
-      // --- chunk data ---
-      const blocks = chunk.getLayer(layer);
+    cmJob.setRequest(async function (job, data){
+      const {chunk, layer} = data;
+      const state = chunk.state;
+      
+      const cx = chunk.cx;
+      const cz = chunk.cz;
       if (
         !chunk.model?.mesh?.doesLayerHaveMesh(layer) &&
         !chunk.transparentModel?.mesh?.doesLayerHaveMesh(layer)
       ) {
-        if (utils.isLayerEmpty(blocks)) {
-          chunkVolumeArrays.release(blocks);
+        const blocksView = chunk.getLayerView(layer);
+        if (utils.isLayerEmpty(blocksView)) {
           state.meshed[layer] = true;
           state.queuedForMesh[layer] = false;
           return;
         }
       }
-      const blockPalette = chunk.getPalette()
-      // --- neighbors ---
-      const nbs = Array(4);
+      state.queuedForMesh[layer] = true;
+      const result = await workerManager.centralWorkerPool.runTask(job.jobTypeId, {chunk, cx, cz, layer});
+      if(!result) return;
+      if(result.error){
+        throw new Error("Mesh worker error: "+result.error+" stack: "+result.stack+" jobtype: "+result.jobType);
+      }
+      const {buffer, vertices, transparentVertices} = result;
+      job.releaseBuffer(buffer);
+      chunk.createMesh({vertices, transparentVertices}, layer);
+      chunk.state.meshed[layer] = true;
+      chunk.state.queuedForMesh[layer] = false;
+      chunksMeshed++;
+    })
+    cmJob.setPrepare(function (job, dataIn){
+      const {chunk, cx, cz, layer} = dataIn;
+      const buffer = job.getBuffer();
+      const views = job.createViews(buffer);
+      chunk.getLayer(layer, views.blocks);
+      views.blockPalette.set(chunk.blockPalette);
+
+      const nbs = new Array(4);
       utils.getNeighborChunks(nbs, cx, cz);
       const east  = nbs[2];
       const west  = nbs[3];
       const north = nbs[0];
       const south = nbs[1];
 
-      // --- slices (no spreads, no temp objects) ---
-      const slices = {}
-      const slcs = new Array(4);
+      const slcs = [views.sliceEast, views.sliceWest, views.sliceNorth, views.sliceSouth];
       utils.getNeighborSlices(slcs, east, west, north, south, layer);
-      slices.east = slcs[0];
-      slices.west = slcs[1];
-      slices.north  = slcs[2];
-      slices.south  = slcs[3];
-      slices.up   = chunk.getYSlice(0, layer + 1);
-      slices.down = chunk.getYSlice(CHUNK_SIZE - 1, layer - 1);
+      chunk.getYSlice(0, layer + 1, views.sliceUp);
+      chunk.getYSlice(CHUNK_SIZE - 1, layer - 1, views.sliceDown);
 
-      // --- transfer list (manual, fixed order) ---
-      const transfer = [
-        blocks.buffer,
-        blockPalette.buffer,
-        slices.east.buffer,
-        slices.west.buffer,
-        slices.north.buffer,
-        slices.south.buffer,
-        slices.up.buffer,
-        slices.down.buffer
-      ];
-      const result = await this.centralWorkerPool.runTask(
-        "CM",
-        { blocks, blockPalette, slices, cx, cz, layer },
-        transfer
-      );
-
-      // --- error path ---
-      if (result.error) {
-        // Avoid in hot path unless debugging
-        console.error("Chunk mesher error:", result.stack);
-        return;
+      views.cx[0] = cx;
+      views.cz[0] = cz;
+      views.layer[0] = layer;
+      const data = {buffer};
+      const transfer = [buffer];
+      return {data, transfer};
+    })
+    cmJob.setWorkerFunction("CM", function (script = new WorkerScript(), jobType, dataIn){
+      const {buffer} = dataIn;
+      const views = JobType.jobTypes[jobType].createViews(buffer);
+      const blocks = views.blocks;
+      const blockPalette = views.blockPalette;
+      const layer = views.layer[0];
+      const slices = {
+        east: views.sliceEast,
+        west: views.sliceWest,
+        north: views.sliceNorth,
+        south: views.sliceSouth,
+        up: views.sliceUp,
+        down: views.sliceDown
       }
-      // --- release slices (manual, no Object.keys) ---
-      let s;
+      const {
+        vertices,
+        transparentVertices
+      } = Chunk.buildMesh(blocks, blockPalette, slices, layer);
+      const data = {buffer};
+      const transfer = [buffer];
 
-      s = result.slices.east;  chunkAreaArrays.release(s); result.slices.east  = null;
-      s = result.slices.west;  chunkAreaArrays.release(s); result.slices.west  = null;
-      s = result.slices.north; chunkAreaArrays.release(s); result.slices.north = null;
-      s = result.slices.south; chunkAreaArrays.release(s); result.slices.south = null;
-      s = result.slices.up;    chunkAreaArrays.release(s); result.slices.up    = null;
-      s = result.slices.down;  chunkAreaArrays.release(s); result.slices.down  = null;
-
-      // --- release blocks ---
-      chunkVolumeArrays.release(result.blocks);
-      chunkPaletteArrays.release(result.blockPalette);
-      result.blocks = null;
-      result.blockPalette = null;
-
-      // --- mesh creation ---
-      chunk.createMesh(result, layer);
-
-      // --- state updates ---
-      state.meshed[layer] = true;
-      state.queuedForMesh[layer] = false;
-      chunksMeshed++;
-
-    } catch (err) {
-      if (err === "Task cancelled") {
-        state.meshed[layer] = false;
-        state.queuedForMesh[layer] = false;
-        return;
+      if (vertices) {
+        data.vertices = vertices;
+        transfer.push(vertices.buffer);
       }
-      console.error("Meshing error:", err);
-    }
-  }, 
+
+      if (transparentVertices) {
+        data.transparentVertices = transparentVertices;
+        transfer.push(
+          transparentVertices.buffer
+        );
+      }
+      return { data, transfer };
+    })
+    cmJob.setCancel(function (job, taskData){
+      taskData.chunk.state.queuedForMesh[taskData.layer] = false;
+    })
+    workerManager.createWorkerCode();
+    pool.initialize();
+  },
   tryQueueForMeshing(cx,cz, cchunk = null){
     const toCheck = [
       [cx, cz],
@@ -6395,8 +6540,7 @@ const workerManager = {
         if(utils.neighborsGenerated(x, z)){
           for(let i = 0; i<CHUNK_HEIGHT/CHUNK_SIZE; i++){
             if(!chunk.state.meshed[i] && !chunk.state.queuedForMesh[i]){
-              chunk.state.queuedForMesh[i] = true;
-              workerManager.requestChunkMeshing(chunk, i);
+              workerManager.jobs.CM.request({chunk, layer: i});
             }    
           }
         }
@@ -6413,13 +6557,12 @@ biome.squashingFactor = 1;
 biome.offset = 0;
 const textures = new Array(2);
 const SEED = 21;
+const mainThreadChunkSampler = new ChunkSampler(SEED);
+console.log("Main Thread Temperature Permiation: ", mainThreadChunkSampler.temperature.noise.perm);
 const initialRenderDist = 6;
 const chunkCacheAmount = utils.getChunkCacheAmount(initialRenderDist);
 const chunkCache = new ChunkCache(chunkCacheAmount);
 const chunkPool = new ChunkPool(chunkCacheAmount+initialRenderDist*initialRenderDist+300); // Add some extra chunks to the pool
-const chunkVolumeArrays = new Uint8ArrayPool(chunkCacheAmount/8, CHUNK_SIZE*CHUNK_SIZE*CHUNK_SIZE);
-const chunkAreaArrays = new ArrayPool(chunkCacheAmount*6/8, CHUNK_SIZE*CHUNK_SIZE);
-const chunkPaletteArrays = new ArrayPool(chunkCacheAmount/8, 255);
 const camera = new Camera(initialRenderDist);
 const player = new Entity();
 player.transform.setPosition(0, 100, 0);
@@ -6456,25 +6599,17 @@ function updateVisibleChunks(playerChunkX, playerChunkZ, renderRadius) {
     data => !chunksNeededSet.has(utils.chunkKey(data.cx, data.cz))
   );
 
-  // Remove cancelled generation tasks from queuedChunks
-  for (const data of cancelledGen) {
-    workerManager.queuedChunks.delete(utils.chunkKey(data.cx, data.cz));
-    if(data.chunk) chunkPool.release(data.chunk);
-  }
-
   // Process needed chunks
   for (const {cx, cz} of needed) {
-    const key = utils.chunkKey(cx, cz);
     const chunk = chunkCache.get(cx, cz);
 
     // Queue generation if missing
-    if (!chunk && !workerManager.queuedChunks.has(key)) {
-      workerManager.queuedChunks.add(key);
-      workerManager.requestChunkGeneration(cx, cz);
+    if (!chunk) {
+      workerManager.jobs.CG.request({cx, cz});
       continue;
     }
 
-    if (!chunk || !chunk.state.generated) continue;
+    if (!chunk.state.generated) continue;
 
     // Skip if all layers already meshed
     let allMeshed = true;
@@ -6492,8 +6627,7 @@ function updateVisibleChunks(playerChunkX, playerChunkZ, renderRadius) {
     // Queue missing layers for meshing
     for (let layer = 0; layer < meshedLayers.length; layer++) {
       if (!meshedLayers[layer] && !chunk.state.queuedForMesh[layer]) {
-        chunk.state.queuedForMesh[layer] = true;
-        workerManager.requestChunkMeshing(chunk, layer);
+        workerManager.jobs.CM.request({chunk, layer});
       }
     }
   }
@@ -6624,7 +6758,7 @@ function render(time){
 
   passEncoder.setPipeline(opaqueShader.pipeline);
   passEncoder.setBindGroup(0, opaqueShader.globalBindGroup);
-  
+
   for (let c = 0; c < chunksToRender.length; c++) {
     const { cx, cz } = chunksToRender[c];
     if(debug.debugMode && debug.inspectingMode){
