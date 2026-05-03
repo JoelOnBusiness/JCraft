@@ -1099,12 +1099,13 @@ function postShaderLoad(textureImages) {
   utils.log(JSON.stringify(blockStates.data));
   utils.log(JSON.stringify(blockModels.resolvedModelData[meshUtils.getModelDetailsObject(8, converter.getMetaValue({facing: "north", half: "bottom", shape: "straight"}, "stairs")).m]));
   collider.addWireframe();
+  playerCamera.addFrustumWireframe();
   debug.chunkWireframeModel = new WireframeModel(wireframeShader, new BoxWireframeMesh(CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE), [0,0,0]);
   opaqueShader.resizeModelUniformBuffer(chunkPool.size());
   transparentShader.resizeModelUniformBuffer(chunkPool.size());
   chunkPool.initializeModels();
   workerManager.initialize();
-  updateVisibleChunks(Math.floor(camera.transform.position[0]/CHUNK_SIZE), Math.floor(camera.transform.position[2]/CHUNK_SIZE), camera.renderDist);
+  updateVisibleChunks(Math.floor(playerCamera.transform.position[0]/CHUNK_SIZE), Math.floor(playerCamera.transform.position[2]/CHUNK_SIZE), playerCamera.renderDist);
   requestAnimationFrame(render);
 }
 async function loadWebGPU() {
@@ -2422,6 +2423,127 @@ class BoxWireframeMesh{
     return new Float32Array(vertices);
   }
 }
+class FrustumWireframeMesh {
+  constructor(near = 0.1, far = 10.0, fovY = Math.PI / 4, aspect = 1.0) {
+    this.near = near;
+    this.far = far;
+    this.fovY = fovY;
+    this.aspect = aspect;
+
+    const FLOATS_PER_VERTEX = 7; // pos3 + bary3 + edgeIndex1
+
+    const vertices = this.createFrustum(
+      this.near,
+      this.far,
+      this.fovY,
+      this.aspect
+    );
+
+    this.vertexCount = vertices.length / FLOATS_PER_VERTEX;
+
+    this.vertexBuffer = device.createBuffer({
+      size: vertices.length * 4,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      mappedAtCreation: false,
+    });
+
+    device.queue.writeBuffer(this.vertexBuffer, 0, vertices);
+  }
+  dispose() {
+    if (this.vertexBuffer) {
+      this.vertexBuffer.destroy();
+      this.vertexBuffer = null;
+    }
+    this.vertexCount = 0;
+  }
+  /**
+   * If near/far/fov/aspect changed, rebuild geometry
+   */
+  updateShape(near = this.near, far = this.far, fovY = this.fovY, aspect = this.aspect) {
+    this.near = near;
+    this.far = far;
+    this.fovY = fovY;
+    this.aspect = aspect;
+
+    const vertices = this.createFrustum(
+      near,
+      far,
+      fovY,
+      aspect
+    );
+
+    this.vertexCount = vertices.length / 7;
+    device.queue.writeBuffer(this.vertexBuffer, 0, vertices);
+  }
+  /**
+   * Draw.
+   * Assumes your shader uses a model matrix or uses supplied view/proj references.
+   */
+  draw(passEncoder) {
+    passEncoder.setVertexBuffer(0, this.vertexBuffer);
+    passEncoder.draw(this.vertexCount);
+  }
+  /**
+   * Creates a pyramid frustum in camera-local space:
+   * camera at origin looking -Z
+   */
+  createFrustum(near, far, fovY, aspect) {
+    const vertices = [];
+    let faceIndex = 0;
+
+    const tan = Math.tan(fovY * 0.5);
+
+    const nh = tan * near;
+    const nw = nh * aspect;
+
+    const fh = tan * far;
+    const fw = fh * aspect;
+
+    // Near plane
+    const ntl = [-nw,  nh, -near];
+    const ntr = [ nw,  nh, -near];
+    const nbl = [-nw, -nh, -near];
+    const nbr = [ nw, -nh, -near];
+
+    // Far plane
+    const ftl = [-fw,  fh, -far];
+    const ftr = [ fw,  fh, -far];
+    const fbl = [-fw, -fh, -far];
+    const fbr = [ fw, -fh, -far];
+
+    const tri = (a, b, c) => {
+      vertices.push(...a, 1, 0, 0, faceIndex);
+      vertices.push(...b, 0, 1, 0, faceIndex);
+      vertices.push(...c, 0, 0, 1, faceIndex);
+    };
+
+    const quad = (a, b, c, d) => {
+      tri(a, b, c);
+      tri(a, c, d);
+      faceIndex++;
+    };
+
+    // Near plane
+    quad(ntl, ntr, nbr, nbl);
+
+    // Far plane
+    quad(ftr, ftl, fbl, fbr);
+
+    // Left side
+    quad(ftl, ntl, nbl, fbl);
+
+    // Right side
+    quad(ntr, ftr, fbr, nbr);
+
+    // Top side
+    quad(ntl, ftl, ftr, ntr);
+
+    // Bottom side
+    quad(nbl, nbr, fbr, fbl);
+
+    return new Float32Array(vertices);
+  }
+}
 class CompressedMesh{
   constructor(packedU32Array) {
     this.vertexCount = packedU32Array.length / 2;
@@ -2475,22 +2597,90 @@ class Model {
 }
 class WireframeModel {
   static models = [];
-  constructor(shader, mesh = null, color = [1,1,1]){
+  constructor(shader, mesh = null, color = [1, 1, 1], matrixView = null) {
     this.shader = shader;
-    this.uniformData = new Float32Array(this.shader.modelUniformStride / 4);
-    this.uniformData.set(color, 16); // color starts at float offset 16
-    this.transform = new Transform(this.uniformData.subarray(0, 16));
-    this.modelUniformIndex = WireframeModel.models.length;
-    this.toDraw = false;
-    if(mesh !== null){
-      this.mesh = mesh;
-      this.toDraw = true;
+
+    // uniform block storage
+    this.uniformData = new Float32Array(
+      this.shader.modelUniformStride / 4
+    );
+
+    // color starts after mat4
+    this.uniformData.set(color, 16);
+
+    // Optional external matrix reference
+    this.matrixView = matrixView;
+
+    // If using external matrix reference:
+    if (this.matrixView) {
+      this.uniformData.set(this.matrixView, 0);
+      this.transform = null;
+    } else {
+      // Internal transform system (same as before)
+      this.transform = new Transform(
+        this.uniformData.subarray(0, 16)
+      );
     }
+
+    this.modelUniformIndex = WireframeModel.models.length;
+
+    this.mesh = mesh;
+    this.toDraw = mesh !== null;
+
     WireframeModel.models.push(this);
+
     this.writeModelUniformsToBuffer();
   }
-  writeModelUniformsToBuffer(){
-    device.queue.writeBuffer(this.shader.modelUniformBuffer, this.modelUniformIndex * this.shader.modelUniformStride, this.uniformData);
+  syncMatrix() {
+    if (this.matrixView) {
+      this.uniformData.set(this.matrixView, 0);
+      this.writeModelUniformsToBuffer();
+    }
+  }
+  setMatrixView(matrixView) {
+    this.matrixView = matrixView;
+    this.transform = null;
+    this.syncMatrix();
+  }
+  useTransform() {
+    this.matrixView = null;
+    this.transform = new Transform(
+      this.uniformData.subarray(0, 16)
+    );
+  }
+  setColor(r, g, b) {
+    this.uniformData[16] = r;
+    this.uniformData[17] = g;
+    this.uniformData[18] = b;
+  }
+  writeModelUniformsToBuffer() {
+    device.queue.writeBuffer(
+      this.shader.modelUniformBuffer,
+      this.modelUniformIndex * this.shader.modelUniformStride,
+      this.uniformData
+    );
+  }
+  draw(passEncoder) {
+    if (!this.toDraw || !this.mesh) return;
+
+    // Keep camera/view matrix live-updated if using reference
+    this.syncMatrix();
+
+    const offset =
+      this.modelUniformIndex *
+      this.shader.modelUniformStride;
+
+    passEncoder.setBindGroup(
+      1,
+      this.shader.modelBindGroup,
+      [offset]
+    );
+
+    this.mesh.draw(passEncoder);
+  }
+  dispose() {
+    this.toDraw = false;
+    this.mesh = null;
   }
   setPosition(pos){
     this.transform.position.set(pos);
@@ -2508,12 +2698,6 @@ class WireframeModel {
   }
   show(){
     this.toDraw = true;
-  }
-  draw(passEncoder){
-    if(!this.toDraw) return;
-    const offset = this.modelUniformIndex * this.shader.modelUniformStride;
-    passEncoder.setBindGroup(1, this.shader.modelBindGroup, [offset]);
-    this.mesh.draw(passEncoder);
   }
 }
 class ChunkModel {
@@ -2954,6 +3138,17 @@ class Chunk {
       if(data.transparentVertices.length > 0)this.transparentModel.mesh.updateMesh(layer, data.transparentVertices);
     }
   }
+  createGenerationMeshes(data = [{layer, vertices, transparentVertices}]){
+    for (let i = 0; i < data.length; i++){
+      const {layer, vertices, transparentVertices} = data[i];
+      if(vertices) {
+        if(vertices.length>0)this.model.mesh.createMesh(layer, vertices);
+      }
+      if(transparentVertices) {
+        if(transparentVertices.length > 0)this.transparentModel.mesh.createMesh(layer, transparentVertices);
+      }
+    }
+  }
   getBlock(index) {
     return this.blockPalette[this.blocks[index]];
   }
@@ -3097,9 +3292,10 @@ class JobType {
       this.viewFactory = new Function(`throw new Error("View Factory not compiled for jobTypeId ${this.jobTypeId} name ${this.jobName}")`);
     }
   }
-  configure(name, schema) {
+  configure(name, schema = null) {
     this.jobName = name;
     workerManager.jobs[name] = this;
+    if(!schema) return;
     this.dataBufferPool = new BufferPool();
     this.totalByteSize = 0;
     let offset = 0;
@@ -3341,6 +3537,40 @@ class ChunkMesh {
     //console.log(this.slotSizes);
     this.writeSlotCounts();
     if(this.layersExist[meshIndex] === 0) this.layersExist[meshIndex] = 1;
+  }
+  createMesh(meshLayer, packedUint32Array) {
+    const meshIndex = meshLayer;
+
+    const slotCount = Math.ceil(packedUint32Array.length/this.UINT32_PER_SLOT);
+    // allocate exactly enough contiguous slots
+    const slots = this.allocateSlots(meshIndex, slotCount);
+
+    this.meshSlots[meshIndex] = slots;
+
+    const firstSlot = slots[0];
+    const baseVertex = firstSlot * ChunkMesh.VERTS_PER_SLOT;
+
+    let uint32lengthRemaining = packedUint32Array.length;
+    for (let i = 0; i < slotCount; i++) {
+      const slotLength = Math.min(this.UINT32_PER_SLOT, uint32lengthRemaining);
+      this.updateSlotCount(
+        slots[i],
+        slotLength / this.UINT32_PER_VERTEX
+      );
+      uint32lengthRemaining -= slotLength;
+    }
+
+    // Single GPU upload
+    device.queue.writeBuffer(
+      this.vertexBuffer,
+      baseVertex * this.BYTES_PER_VERTEX,
+      packedUint32Array,
+      0,
+      packedUint32Array.length
+    );
+
+    this.writeSlotCounts();
+    this.layersExist[meshIndex] = 1;
   }
   allocateSlots(meshIndex, slots) {
     const allocatedSlots = [];
@@ -3766,7 +3996,6 @@ class WorkerScript{
     };
     this.biome = biome;
     this.sampler = new ChunkSampler(data.seed)
-    console.log("Worker Thread Temperature Permiation: ", this.sampler.temperature.noise.perm);
   }
   processTask(e, jobType){
     const dataIn = e;
@@ -4232,16 +4461,23 @@ class BoxCollider {
   }
 }
 class Camera {
+  static viewMatrixCenterVec = new vec3();
   constructor(initialRenderDist = 8){
     this.transform = new Transform();
-    this.renderDist = initialRenderDist;
+    this.viewMatrix = new Float32Array(16);
+    this.projectionMatrix = new Float32Array(16);
+    this.pvMatrix = new Float32Array(16);
+    this.transformMatrix = new Float32Array(16);
+    this.fov = Math.PI/3;
+    this.near = 0.01;
+    this.setRenderDist(initialRenderDist);
     this.yaw = 0;
     this.pitch = 0;
     this.targetingYaw = 0;
     this.targetingPitch = 0;
+    this.aspect = 1.0;
     this.target = null;
-    this.person = 3; // 1 = first person, 2 = third person close, 3 = third person far
-    this.collider = new BoxCollider(0.05, 0.05, 0.05, true);
+    this.hasFrustumWireframe = false;
   }
   static lookAt(cameraPos, targetPos){
     const dx = targetPos[0] - cameraPos[0];
@@ -4262,11 +4498,11 @@ class Camera {
     return { yaw, pitch };
   }
   attach(entity) {
+    entity.camera = this;
     if(this.target){
       this.target.camera = null;
     }
     this.target = entity;
-    entity.camera = this;
   }
   getViewMatrix(){
     // camera forward direction from yaw + pitch
@@ -4275,16 +4511,71 @@ class Camera {
     const fz = Math.cos(this.targetingYaw) * Math.cos(this.targetingPitch);
 
     const eye = this.transform.position;
-    const center = new Float32Array([
+    const center = Camera.viewMatrixCenterVec.set([
       eye[0] + fx,
       eye[1] + fy,
       eye[2] + fz
     ]);
-
-    return Mat4.lookAt(eye, center, [0, 1, 0]);
+    Mat4.lookAt(eye, center, [0, 1, 0], this.viewMatrix);
+    if(this.hasFrustumWireframe) Mat4.invert(this.viewMatrix, this.transformMatrix);
+    return this.viewMatrix;
   }
   getPosition(){
     return this.transform.position;
+  }
+  updateFromEntity(entity) {
+    this.transform.position.set(entity.transform.position);
+    this.targetingPitch = this.pitch;
+    this.targetingYaw = this.yaw;
+  }
+  updateFrustumWireframe(){
+    if(!this.hasFrustumWireframe) return;
+    this.frustumWireframe.mesh.updateShape(this.near, this.far, this.fov, this.aspect);
+  }
+  setRenderDist(dist){
+    this.renderDist = dist;
+    this.far = 100*CHUNK_SIZE;
+    if(this.hasFrustumWireframe){
+      this.updateFrustumWireframe();
+    }
+  }
+  setAspect(aspect){
+    if(aspect === this.aspect) return;
+    this.aspect = aspect;
+    if(this.hasFrustumWireframe){
+      this.updateFrustumWireframe();
+    }
+  }
+  getProjectionMatrix(){
+    return Mat4.perspective(this.fov, this.aspect, this.near, this.far, this.projectionMatrix);
+  }
+  getProjectionViewMatrix(){
+    return Mat4.multiply(this.getProjectionMatrix(), this.getViewMatrix(), this.pvMatrix);
+  }
+  addFrustumWireframe(){
+    this.frustumWireframe = new WireframeModel(wireframeShader, new FrustumWireframeMesh(this.near, this.far, this.fov, this.aspect), [1,0,0], this.transformMatrix);
+    this.enableWireframe()
+  }
+  disableWireframe(){
+    this.hasFrustumWireframe = false;
+    this.frustumWireframe.hide()
+  }
+  enableWireframe(){
+    this.hasFrustumWireframe = true;
+    this.frustumWireframe.show();
+  }
+}
+class PlayerCamera extends Camera{
+  constructor(renderDist = 8){
+    super(renderDist);
+    this.person = 3; // 1 = first person, 2 = third person close, 3 = third person far
+    this.collider = new BoxCollider(0.05, 0.05, 0.05, true);
+    this.setRenderDist(renderDist);
+  }
+  setRenderDist(dist){
+    this.renderDist = dist;
+    this.far = this.renderDist*2*CHUNK_SIZE;
+    this.updateFrustumWireframe();
   }
   updateFromEntity(entity) {
     if(this.person === 1){
@@ -4335,6 +4626,12 @@ class Entity {
     }
     if (this.collider) {
       this.collider.update(this, dt);
+    }else{
+      const pos = this.getPosition();
+      const vel = this.getVelocity();
+      pos[0] += vel[0] * dt;
+      pos[1] += vel[1] * dt;
+      pos[2] += vel[2] * dt;
     }
     if (this.camera) {
       this.camera.updateFromEntity(this);
@@ -4369,9 +4666,14 @@ class Entity {
 class PlayerController {
   constructor() {
     this.velocity = new Float32Array(3);
+    this.target = null;
   }
   attach(entity) {
     entity.controller = this;
+    if(this.target){
+      this.target.controller = null;
+    }
+    this.target = entity;
   }
   update(entity) {
     const camera = entity.camera;
@@ -4415,14 +4717,15 @@ const inputManager = new InputManager(canvas);
 const inputActions = InputActions.initializeKeyBindings(inputManager);
 const Mat4 = {
   identity:()=>new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]),
-  perspective:(fovy,aspect,near,far)=>{
+  perspective:(fovy,aspect,near,far, out = new Float32Array(16))=>{
     const f=1/Math.tan(fovy/2), nf=1/(near-far);
-    return new Float32Array([
+    out.set([
       f/aspect,0,0,0,
       0,f,0,0,
       0,0,(far+near)*nf,-1,
       0,0,(2*far*near)*nf,0
     ]);
+    return out;
   },
   translate:(x,y,z)=>{
     const m=Mat4.identity();
@@ -4452,8 +4755,8 @@ const Mat4 = {
     m[0]=x; m[5]=y; m[10]=z;
     return m;
   },
-  multiply:(a,b)=>{
-    const r = new Float32Array(16);
+  multiply:(a,b, out = new Float32Array(16))=>{
+    const r = out;
     for (let i = 0; i < 4; i++) {       // column
       for (let j = 0; j < 4; j++) {     // row
         r[i*4+j] =
@@ -4465,7 +4768,7 @@ const Mat4 = {
     }
     return r;
   },
-  lookAt: function(eye, center, up) {
+  lookAt: function(eye, center, up, out = new Float32Array(16)) {
     const f = [
       center[0] - eye[0],
       center[1] - eye[1],
@@ -4497,7 +4800,7 @@ const Mat4 = {
     ];
 
     // Build 4x4 matrix (column-major)
-    return new Float32Array([
+    out.set([
       s[0],  u[0], -f[0], 0,
       s[1],  u[1], -f[1], 0,
       s[2],  u[2], -f[2], 0,
@@ -4506,6 +4809,7 @@ const Mat4 = {
       (f[0]*eye[0] + f[1]*eye[1] + f[2]*eye[2]),
       1
     ]);
+    return out;
       
   } ,
   ortho: function (left, right, bottom, top, near, far) {
@@ -4522,7 +4826,61 @@ const Mat4 = {
     (far + near) * nf,
     1
   ]);
-}
+},
+  invert(m, out = new Float32Array(16)) {
+    const a00 = m[0],  a01 = m[1],  a02 = m[2],  a03 = m[3];
+    const a10 = m[4],  a11 = m[5],  a12 = m[6],  a13 = m[7];
+    const a20 = m[8],  a21 = m[9],  a22 = m[10], a23 = m[11];
+    const a30 = m[12], a31 = m[13], a32 = m[14], a33 = m[15];
+
+    const b00 = a00 * a11 - a01 * a10;
+    const b01 = a00 * a12 - a02 * a10;
+    const b02 = a00 * a13 - a03 * a10;
+    const b03 = a01 * a12 - a02 * a11;
+    const b04 = a01 * a13 - a03 * a11;
+    const b05 = a02 * a13 - a03 * a12;
+
+    const b06 = a20 * a31 - a21 * a30;
+    const b07 = a20 * a32 - a22 * a30;
+    const b08 = a20 * a33 - a23 * a30;
+    const b09 = a21 * a32 - a22 * a31;
+    const b10 = a21 * a33 - a23 * a31;
+    const b11 = a22 * a33 - a23 * a32;
+
+    const det =
+      b00 * b11 -
+      b01 * b10 +
+      b02 * b09 +
+      b03 * b08 -
+      b04 * b07 +
+      b05 * b06;
+
+    if (det === 0) return out;
+
+    const invDet = 1.0 / det;
+
+    out[0]  = ( a11 * b11 - a12 * b10 + a13 * b09) * invDet;
+    out[1]  = (-a01 * b11 + a02 * b10 - a03 * b09) * invDet;
+    out[2]  = ( a31 * b05 - a32 * b04 + a33 * b03) * invDet;
+    out[3]  = (-a21 * b05 + a22 * b04 - a23 * b03) * invDet;
+
+    out[4]  = (-a10 * b11 + a12 * b08 - a13 * b07) * invDet;
+    out[5]  = ( a00 * b11 - a02 * b08 + a03 * b07) * invDet;
+    out[6]  = (-a30 * b05 + a32 * b02 - a33 * b01) * invDet;
+    out[7]  = ( a20 * b05 - a22 * b02 + a23 * b01) * invDet;
+
+    out[8]  = ( a10 * b10 - a11 * b08 + a13 * b06) * invDet;
+    out[9]  = (-a00 * b10 + a01 * b08 - a03 * b06) * invDet;
+    out[10] = ( a30 * b04 - a31 * b02 + a33 * b00) * invDet;
+    out[11] = (-a20 * b04 + a21 * b02 - a23 * b00) * invDet;
+
+    out[12] = (-a10 * b09 + a11 * b07 - a12 * b06) * invDet;
+    out[13] = ( a00 * b09 - a01 * b07 + a02 * b06) * invDet;
+    out[14] = (-a30 * b03 + a31 * b01 - a32 * b00) * invDet;
+    out[15] = ( a20 * b03 - a21 * b01 + a22 * b00) * invDet;
+
+    return out;
+  }
 };
 const meshUtils = {
   getUVs: function (index) {
@@ -4910,14 +5268,14 @@ const utils = {
     const chunkCacheAmount = utils.getChunkCacheAmount(maxRenderDist);
     chunkCache.setSize(chunkCacheAmount);
     chunkPool.setSize(chunkCacheAmount+300); // Add some extra chunks to the pool
-    camera.renderDist = maxRenderDist;
-    const camPos = camera.getPosition();
+    playerCamera.setRenderDist(maxRenderDist);
+    const camPos = playerCamera.getPosition();
     const camChunkX = Math.floor(camPos[0]/CHUNK_SIZE);
     const camChunkZ = Math.floor(camPos[2]/CHUNK_SIZE);
     if(shadersLoaded){
       opaqueShader.resizeModelUniformBuffer(chunkPool.size());
       transparentShader.resizeModelUniformBuffer(chunkPool.size());
-      updateVisibleChunks(camChunkX, camChunkZ, camera.renderDist);
+      updateVisibleChunks(camChunkX, camChunkZ, playerCamera.renderDist);
     }
   },
   getChunkCacheAmount(renderDist){
@@ -5874,12 +6232,12 @@ class CaveCarver{
   constructor(){
     this.roomWidthBounds = [5,20];
     this.roomHeightBounds = [5,18];
-    this.trunkWidthBounds = [2,19];
+    this.trunkWidthBounds = [4,19];
     this.trunkHeightBounds = [5, 17];
-    this.branchHeightBounds = [2,7];
+    this.branchHeightBounds = [3,7];
     this.branchWidthBounds = [3, 7];
     this.worldHeight = 70;
-    this.cavesPerRegion = 0.02
+    this.cavesPerRegion = 0.0175
     this.regionSize = 12;
   }
   randInRange(range = [1,1], rand){
@@ -6260,8 +6618,7 @@ const debug = {
       text = text.concat(`${key}: ${info[key]}\n`);
     }
     this.text = text.trim();
-  }
-  
+  }  
 }
 const workerManager = {
   workers: Math.min(10, Math.max(threadCapacity-1, 1)),
@@ -6521,6 +6878,52 @@ const workerManager = {
     cmJob.setCancel(function (job, taskData){
       taskData.chunk.state.queuedForMesh[taskData.layer] = false;
     })
+    const fcmJob = new JobType();
+    fcmJob.configure("FCM");
+    fcmJob.setRequest(async function(job, dataIn){
+      const {chunk} = dataIn;
+      const state = chunk.state;
+      
+      const cx = chunk.cx;
+      const cz = chunk.cz;
+
+      const chunkMeshJobType = workerManager.jobs.CM;
+      
+      const promises = [];
+      const promiseLayers = [];
+
+      for (let i = 0; i < CHUNK_HEIGHT/CHUNK_SIZE; i++) {
+        if(!chunk.state.meshed[i] && !chunk.state.queuedForMesh[i]){
+          const layer = i;
+          const blocksView = chunk.getLayerView(layer);
+          if (utils.isLayerEmpty(blocksView)) {
+            state.meshed[layer] = true;
+            state.queuedForMesh[layer] = false;
+            continue;
+          }
+          state.queuedForMesh[i] = true;
+          promises.push(
+            workerManager.centralWorkerPool.runTask(chunkMeshJobType.jobTypeId, {chunk, cx, cz, layer})
+          )
+          promiseLayers.push(layer);
+        } 
+      }
+
+      const results = await Promise.all(promises);
+      const meshes = [];
+      for (let i = 0; i<promises.length; i++){
+        const result = results[i];
+        const layer = promiseLayers[i];
+        if(!result) continue;
+        if(result.error){
+          throw new Error("Mesh worker error: "+result.error+" stack: "+result.stack+" jobtype: "+result.jobType);
+        }
+        const {buffer, vertices, transparentVertices} = result;
+        chunkMeshJobType.releaseBuffer(buffer);
+        meshes.push({layer, vertices, transparentVertices});
+      }
+      chunk.createGenerationMeshes(meshes);
+    });
     workerManager.createWorkerCode();
     pool.initialize();
   },
@@ -6538,11 +6941,7 @@ const workerManager = {
         chunk.state.generated
       ) {
         if(utils.neighborsGenerated(x, z)){
-          for(let i = 0; i<CHUNK_HEIGHT/CHUNK_SIZE; i++){
-            if(!chunk.state.meshed[i] && !chunk.state.queuedForMesh[i]){
-              workerManager.jobs.CM.request({chunk, layer: i});
-            }    
-          }
+          workerManager.jobs.FCM.request({chunk});
         }
       }
     }
@@ -6558,19 +6957,23 @@ biome.offset = 0;
 const textures = new Array(2);
 const SEED = 21;
 const mainThreadChunkSampler = new ChunkSampler(SEED);
-console.log("Main Thread Temperature Permiation: ", mainThreadChunkSampler.temperature.noise.perm);
 const initialRenderDist = 6;
 const chunkCacheAmount = utils.getChunkCacheAmount(initialRenderDist);
 const chunkCache = new ChunkCache(chunkCacheAmount);
 const chunkPool = new ChunkPool(chunkCacheAmount+initialRenderDist*initialRenderDist+300); // Add some extra chunks to the pool
-const camera = new Camera(initialRenderDist);
+const playerCamera = new PlayerCamera(initialRenderDist);
 const player = new Entity();
 player.transform.setPosition(0, 100, 0);
 const controller = new PlayerController();
 const collider = new BoxCollider(0.6, 1.8, 0.6);
-camera.attach(player);
+playerCamera.attach(player);
 controller.attach(player);
 collider.attach(player);
+const spectator = new Entity();
+spectator.speed = 100;
+const spectatorCamera = new Camera();
+spectatorCamera.attach(spectator);
+let activeCamera = playerCamera;
 let chunksGenerated = 0;
 let chunksMeshed = 0;
 blockStates.processBlockList();
@@ -6696,8 +7099,7 @@ function isChunkVisible(planes, cx, cy, cz) {
 // ===== Render Loop =====
 let running = true;
 let frameId = null;
-const fov = Math.PI/3;
-const near = 0.01;
+
 let storageQuota =0;
 let storage = 0;
 if (navigator.storage && navigator.storage.estimate) {
@@ -6706,12 +7108,12 @@ if (navigator.storage && navigator.storage.estimate) {
     storageQuota = (estimate.quota / 1024 / 1024).toFixed(2);
   });
 }
-let prevChunkX = Math.floor(camera.getPosition()[0]/CHUNK_SIZE);
-let prevChunkZ = Math.floor(camera.getPosition()[2]/CHUNK_SIZE); 
+let prevChunkX = Math.floor(playerCamera.getPosition()[0]/CHUNK_SIZE);
+let prevChunkZ = Math.floor(playerCamera.getPosition()[2]/CHUNK_SIZE); 
 let drawn = 0;
 let transparentDrawn = 0;
 let gpuTime, jsTime = 0;
-const transparentModelsToDraw = new Array(Math.ceil((camera.renderDist+1)*(camera.renderDist+1)*Math.PI)*(CHUNK_HEIGHT/CHUNK_SIZE));
+const transparentModelsToDraw = new Array(Math.ceil((playerCamera.renderDist+1)*(playerCamera.renderDist+1)*Math.PI)*(CHUNK_HEIGHT/CHUNK_SIZE));
 let transparentModelIndex = 0;
 const textColor = new Float32Array([1.0, 0.0, 0.0, 1.0]);
 
@@ -6722,29 +7124,29 @@ function render(time){
   gameClock.tick(time);
 
   player.update(gameClock.deltaTime, debug.debugMode);
+  spectator.update(gameClock.deltaTime, debug.debugMode);
 
-  const camPos = camera.getPosition();
+  const camPos = playerCamera.getPosition();
   const camChunkX = Math.floor(camPos[0]/CHUNK_SIZE);
   const camChunkZ = Math.floor(camPos[2]/CHUNK_SIZE);
   const camChunkLayer = Math.floor(camPos[1]/CHUNK_SIZE)
   const currentChunk = chunkCache.simpleGet(camChunkX, camChunkZ);
   const aspect = canvasWidth/canvasHeight;
   if(camChunkX !== prevChunkX || camChunkZ!== prevChunkZ){
-    updateVisibleChunks(camChunkX, camChunkZ, camera.renderDist);
+    updateVisibleChunks(camChunkX, camChunkZ, playerCamera.renderDist);
     debug.chunkWireframeModel.setPosition([camChunkX*CHUNK_SIZE+CHUNK_SIZE/2, CHUNK_HEIGHT/2, camChunkZ*CHUNK_SIZE+CHUNK_SIZE/2]);
   }
   prevChunkX = camChunkX;
   prevChunkZ = camChunkZ;
-  const far = (camera.renderDist*1.5)*CHUNK_SIZE;
-  const projection = Mat4.perspective(fov, aspect, near, far);
-  const view = camera.getViewMatrix();
   const orthoMatrix = Mat4.ortho(
-    0, canvas.width,        // left, right
-    canvas.height, 0,       // bottom, top  (flip Y for screen coords)
+    0, canvasWidth,        // left, right
+    canvasHeight, 0,       // bottom, top  (flip Y for screen coords)
     -1, 1                   // near, far
   );
-  const m = Mat4.multiply(projection, view)
-  const frustumPlanes = extractPlanes(m);
+  activeCamera.setAspect(aspect);
+  const m = activeCamera.getProjectionViewMatrix();
+  const cullm = activeCamera === playerCamera? m : playerCamera.getProjectionViewMatrix();
+  const frustumPlanes = extractPlanes(cullm);
   const layers = CHUNK_HEIGHT / CHUNK_SIZE;
   drawn = 0;
   transparentDrawn = 0
@@ -6758,49 +7160,59 @@ function render(time){
 
   passEncoder.setPipeline(opaqueShader.pipeline);
   passEncoder.setBindGroup(0, opaqueShader.globalBindGroup);
-
-  for (let c = 0; c < chunksToRender.length; c++) {
-    const { cx, cz } = chunksToRender[c];
-    if(debug.debugMode && debug.inspectingMode){
-      if(!(cx === debug.inspectingChunk.x && cz === debug.inspectingChunk.z)){
-        continue;
+  if(debug.debugMode && debug.mode === "Inspecting"){
+    const chunk = chunkCache.simpleGet(debug.inspectingChunk.x, debug.inspectingChunk.z);
+    if(chunk){
+      const model = chunk.model;
+      const tModel = chunk.transparentModel;
+      if (model?.mesh) {
+        drawn+=model.draw(passEncoder, 0, layers-1);
       }
-    }
-    let lowestLayer = 0;
-    let highestLayer = 0;
-    let visible = false;
-    for (let i = 0; i < layers; i++) {
-      if (isChunkVisible(frustumPlanes, cx, i, cz)) {
-        lowestLayer = i;
-        highestLayer = i
-        visible = true;
-        break;
+      if (tModel?.mesh) {
+        transparentModelsToDraw[transparentModelIndex++] = {tModel, lowestLayer: 0, highestLayer: layers-1};
       }
+      
     }
-    if(!visible){
-      continue;
-    }else{
-      for(let i = layers-1; i>lowestLayer; i--){
+    
+  }else{
+    for (let c = 0; c < chunksToRender.length; c++) {
+      const { cx, cz } = chunksToRender[c];
+    
+      let lowestLayer = 0;
+      let highestLayer = 0;
+      let visible = false;
+      for (let i = 0; i < layers; i++) {
         if (isChunkVisible(frustumPlanes, cx, i, cz)) {
-          highestLayer = i;
+          lowestLayer = i;
+          highestLayer = i
+          visible = true;
           break;
         }
       }
-    }
-    const chunk = chunkCache.simpleGet(cx, cz);
-    if(!chunk){
-      continue;
-    }
-    const model = chunk.model;
-    const tModel = chunk.transparentModel;
-    if (model?.mesh) {
-      drawn+=model.draw(passEncoder, lowestLayer, highestLayer);
-    }
-    if (tModel?.mesh) {
-      transparentModelsToDraw[transparentModelIndex++] = {tModel, lowestLayer, highestLayer};
+      if(!visible){
+        continue;
+      }else{
+        for(let i = layers-1; i>lowestLayer; i--){
+          if (isChunkVisible(frustumPlanes, cx, i, cz)) {
+            highestLayer = i;
+            break;
+          }
+        }
+      }
+      const chunk = chunkCache.simpleGet(cx, cz);
+      if(!chunk){
+        continue;
+      }
+      const model = chunk.model;
+      const tModel = chunk.transparentModel;
+      if (model?.mesh) {
+        drawn+=model.draw(passEncoder, lowestLayer, highestLayer);
+      }
+      if (tModel?.mesh) {
+        transparentModelsToDraw[transparentModelIndex++] = {tModel, lowestLayer, highestLayer};
+      }
     }
   }
-
   passEncoder.setPipeline(transparentShader.pipeline);
   passEncoder.setBindGroup(0, transparentShader.globalBindGroup);
 
@@ -6816,7 +7228,7 @@ function render(time){
     passEncoder.setBindGroup(0, wireframeShader.globalBindGroup);
     for (let c = WireframeModel.models.length-1; c >=0; c--) {
       const wireframe = WireframeModel.models[c];
-      wireframe.draw(passEncoder);
+      if(wireframe.toDraw) wireframe.draw(passEncoder);
     }
   }
 
@@ -6831,8 +7243,8 @@ function render(time){
   textRenderer.begin();
   if(debug.debugMode){
     debug.debug_update({
-      camPos: "x: " + camera.transform.position[0].toFixed(2) + ", y: " + camera.transform.position[1].toFixed(2) + ", z: " + camera.transform.position[2].toFixed(2)+ " yaw: "+camera.yaw.toFixed(2)+" pitch: "+camera.pitch.toFixed(2),
-      renderDist: camera.renderDist,
+      camPos: "x: " + activeCamera.transform.position[0].toFixed(2) + ", y: " + activeCamera.transform.position[1].toFixed(2) + ", z: " + activeCamera.transform.position[2].toFixed(2)+ " yaw: "+activeCamera.yaw.toFixed(2)+" pitch: "+activeCamera.pitch.toFixed(2),
+      renderDist: playerCamera.renderDist,
       camChunkPos: "cx: " + camChunkX + ", cz: " + camChunkZ + ", layer: "+camChunkLayer,
       playerVelocity: player.getVelocity().map(v => v.toFixed(2)).join(", "),
       playerPosition: player.getPosition().map(v => v.toFixed(2)).join(", "),
@@ -6886,13 +7298,36 @@ function render(time){
   if(inputManager.isKeyPressed(74)){ // J for debug toggle
     debug.debugMode = !debug.debugMode;
   } 
-  if(inputManager.isKeyPressed(75)){ // K for debug toggle
-    debug.inspectingMode = !debug.inspectingMode;
-    if(debug.inspectingMode){
+  if(inputManager.isKeyPressed(75)){ // K for chunk inspect toggle
+    if(debug.mode === "Inspecting"){
+      debug.mode = "None";
+      activeCamera = playerCamera;
+      playerCamera.disableWireframe();
+      controller.attach(player);
+    }else{
+      debug.mode = "Inspecting";
       debug.inspectingChunk = { x: camChunkX, z: camChunkZ };
+      activeCamera = spectatorCamera;
+      playerCamera.disableWireframe();
+      spectator.setPosition([camChunkX*CHUNK_SIZE, CHUNK_HEIGHT/2, camChunkZ*CHUNK_SIZE]);
+      controller.attach(spectator);
     }
   } 
-
+  if(inputManager.isKeyPressed(76)){ // L for spectator toggle
+    if(debug.mode === "Spectator"){
+      debug.mode = "None";
+      activeCamera = playerCamera;
+      playerCamera.disableWireframe();
+      controller.attach(player);
+    }else{
+      debug.mode = "Spectator";
+      activeCamera = spectatorCamera;
+      const pos = player.getPosition();
+      spectator.setPosition([pos[0]+10, pos[1]+10, pos[2]+10]);
+      playerCamera.enableWireframe();
+      controller.attach(spectator);
+    }
+  }
   inputManager.update();
 
   jsTime = performance.now() - jsStart;
