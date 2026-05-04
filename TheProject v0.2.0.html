@@ -3720,6 +3720,7 @@ class WorkerPool {
     this.taskQueues = new Map(); // jobType => TaskQueue
     this.tasks = new Map();      // taskId => { resolve, reject }
     this.nextTaskId = 1;
+    this.tasksToResolve = []
   }
 
   initialize() {
@@ -3808,30 +3809,13 @@ class WorkerPool {
         tasksMap.delete(taskId);
         task.resolve(msg.data);
       }
-    
       return;
     }
     if (type === 3) {
-      const tasksMap = this.tasks;
+      
       const results = msg.data;
-      for (let i = 0; i < results.length; i++) {
-        const r = results[i];
-        if (r.error) {
-          console.error("Worker task error:", r.error);
-          const task = this.tasks.get(r.taskId);
-          if (task) {
-            this.tasks.delete(r.taskId);
-            task.reject(r.error);
-          }
-          return;
-        }
-        const taskId = r.taskId;
-
-        const task = tasksMap.get(taskId);
-        if (task !== undefined) {
-          tasksMap.delete(taskId);
-          task.resolve(r.data);
-        }
+      for (let i = results.length; i >=0; i--) {
+        this.tasksToResolve.push(results[i]);
       }
       return;
     }
@@ -3979,6 +3963,31 @@ class WorkerPool {
     }
   }
 
+  resolveBatchedTasks(){
+    const tasks = this.tasksToResolve;
+    if(tasks.length === 0) return;
+    const tasksMap = this.tasks;
+    while(tasks.length >0){
+      const r = tasks.pop();
+      if (r.error) {
+        console.error("Worker task error:", r.error);
+        const task = this.tasks.get(r.taskId);
+        if (task) {
+          this.tasks.delete(r.taskId);
+          task.reject(r.error);
+        }
+        return;
+      }
+      const taskId = r.taskId;
+
+      const task = tasksMap.get(taskId);
+      if (task !== undefined) {
+        tasksMap.delete(taskId);
+        task.resolve(r.data);
+      }
+    }
+  }
+
   cancelTasks(jobTypeName, predicate) {
     const cancelled = [];
     const jobType = workerManager.jobs[jobTypeName];
@@ -4078,6 +4087,7 @@ class WorkerScript {
         offset: biome.offset
       },
       lowWaterMark: workerManager.workerLowWaterMark,
+      batchPostSize: workerManager.batchPostSize,
     };
   }
 
@@ -4097,6 +4107,7 @@ class WorkerScript {
     Object.freeze(WorkerScript.workerFunctionRegistry);
 
     this.lowWaterMark = data.lowWaterMark;
+    this.batchPostSize = data.batchPostSize;
 
     for (const jobtype of data.jobTypes) {
       new JobType(
@@ -4147,31 +4158,60 @@ class WorkerScript {
 
       const { taskId, jobType, data } = task;
 
+      // request refill while still working
+      const complexity = JobType.jobTypes[jobType].complexity;
+      if (
+        this.getQueueComplexity() - complexity <= this.lowWaterMark && !this.moreTasksRequested
+      ) {
+        this.requestMoreTasks();
+      }
+
       try {
         const result = this.processTask(data, jobType);
-        this.results.push({data: {taskId, jobType, data: result.data}, transfer: result.transfer});
-        if(this.results.length >= this.batchPostSize || this.taskQueue.length === 0){
-          const results = [];
-          const transfer = [];
-          while(this.results.length>0){
-            const result = this.results.pop();
-            results.push(result.data);
-            transfer.concat(result.transfer);
-          }
-          
-          if (transfer.length>0) {
-            self.postMessage(
-              {
-                type: 3,
-                data: results,
-              },
-              transfer
+        if(this.batchPostSize === 1){
+          if (result.transfer.length>0) {
+            self.postMessage({
+              type: 1,
+              taskId,
+              jobType,
+              data: result.data
+            },
+              result.transfer
             );
           } else {
             self.postMessage({
-              type: 3,
-              data: results
+              type: 1,
+              taskId,
+              jobType,
+              data: result.data
             });
+          }
+            
+        }else{
+          this.results.push({data: {taskId, jobType, data: result.data}, transfer: result.transfer});
+          if(this.results.length >= this.batchPostSize || this.taskQueue.length === 0){
+            const results = [];
+            const transfer = [];
+            while(this.results.length>0){
+              const result = this.results.pop();
+              results.push(result.data);
+              transfer.concat(result.transfer);
+            }
+            
+            if (transfer.length>0) {
+              self.postMessage(
+                {
+                  type: 3,
+                  data: results,
+                },
+                transfer
+              );
+            } else {
+              self.postMessage({
+                type: 3,
+                data: results
+              });
+            }
           }
         }
       } catch (err) {
@@ -4184,13 +4224,6 @@ class WorkerScript {
             stack: err.stack
           }
         });
-      }
-
-      // request refill while still working
-      if (
-        this.getQueueComplexity() <= this.lowWaterMark && !this.moreTasksRequested
-      ) {
-        this.requestMoreTasks();
       }
     }
 
@@ -6750,9 +6783,10 @@ const debug = {
   }  
 }
 const workerManager = {
-  workers: Math.min(10, Math.max(threadCapacity-1, 1)),
+  workers: Math.min(2, Math.max(threadCapacity-1, 1)),
   workerAssignAmount: 2,
   workerLowWaterMark: 10,
+  workerBatchPostSize: 1,
   queuedChunks: new Set(),
   workerCode: "",
   createWorkerCode(){
@@ -6804,8 +6838,9 @@ const workerManager = {
   jobs: {},
   initialize() {
     this.workerAssignAmount = 1+Math.ceil(this.workers/2);
-    this.workerLowWaterMark = 6 + this.workers*3;
-    const pool = new WorkerPool(this.createWorker, this.workers, 6 + this.workers*2)
+    this.workerLowWaterMark = 2 + this.workers*2;
+    this.workerBatchPostSize = Math.max(1, Math.ceil((this.workers - 2)/2));
+    const pool = new WorkerPool(this.createWorker, this.workers, 4 + this.workers*3)
     workerManager.centralWorkerPool = pool;
     const cgJob = new JobType();
     cgJob.configure("CG", [
@@ -7168,11 +7203,46 @@ function updateVisibleChunks(playerChunkX, playerChunkZ, renderRadius) {
     }
   }
 
+  const playerPos = player.getPosition();
+  const playerVel = player.getVelocity();
+
   // Sort generation queue by distance to player
   workerManager.centralWorkerPool.sortQueue("CG", (a, b) => {
-    const da = utils.dist(a.data.cx, a.data.cz, playerChunkX, playerChunkZ);
-    const db = utils.dist(b.data.cx, b.data.cz, playerChunkX, playerChunkZ);
-    return da - db;
+    const playerChunkX = Math.floor(playerPos[0] / CHUNK_SIZE);
+    const playerChunkZ = Math.floor(playerPos[2] / CHUNK_SIZE);
+
+    if (a.data.cx === playerChunkX && a.data.cz === playerChunkZ) return -1;
+    if (b.data.cx === playerChunkX && b.data.cz === playerChunkZ) return 1;
+
+    const vx = playerVel[0];
+    const vz = playerVel[2];
+
+    // Normalize direction (avoid huge velocity bias)
+    const mag = Math.hypot(vx, vz) || 1;
+    const dx = vx / mag;
+    const dz = vz / mag;
+
+    function score(cx, cz) {
+      const rx = cx - playerChunkX;
+      const rz = cz - playerChunkZ;
+
+      // --- 2. Directional bias (dot product)
+      const speed = Math.hypot(vx, vz);
+      const useDir = speed > 0.1;
+
+      const forward = useDir ? (rx * dx + rz * dz) : 0;
+
+      // --- 3. Small tie-breaker (Euclidean squared)
+      const dist2 = rx * rx + rz * rz;
+
+      // weights tuned for stability
+      return (
+        dist2 * 5        // tiny smoothing
+        - forward * 25        // strong forward bias
+      );
+    }
+
+    return score(a.data.cx, a.data.cz) - score(b.data.cx, b.data.cz);
   });
 
   return;
@@ -7253,6 +7323,8 @@ const textColor = new Float32Array([1.0, 0.0, 0.0, 1.0]);
 function render(time){
 
   const jsStart = time;
+
+  workerManager.centralWorkerPool.resolveBatchedTasks();
 
   gameClock.tick(time);
 
