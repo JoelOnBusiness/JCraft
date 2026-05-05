@@ -4087,7 +4087,7 @@ class WorkerScript {
         offset: biome.offset
       },
       lowWaterMark: workerManager.workerLowWaterMark,
-      batchPostSize: workerManager.batchPostSize,
+      batchPostSize: workerManager.workerBatchPostSize,
     };
   }
 
@@ -6783,7 +6783,7 @@ const debug = {
   }  
 }
 const workerManager = {
-  workers: Math.min(2, Math.max(threadCapacity-1, 1)),
+  workers: Math.min(10, Math.max(threadCapacity-1, 1)),
   workerAssignAmount: 2,
   workerLowWaterMark: 10,
   workerBatchPostSize: 1,
