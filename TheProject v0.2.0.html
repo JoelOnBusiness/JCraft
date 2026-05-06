@@ -3814,7 +3814,7 @@ class WorkerPool {
     if (type === 3) {
       
       const results = msg.data;
-      for (let i = results.length; i >=0; i--) {
+      for (let i = results.length-1; i >=0; i--) {
         this.tasksToResolve.push(results[i]);
       }
       return;
@@ -4168,7 +4168,7 @@ class WorkerScript {
 
       try {
         const result = this.processTask(data, jobType);
-        if(this.batchPostSize === 1){
+        if(this.batchPostSize === 0){
           if (result.transfer.length>0) {
             self.postMessage({
               type: 1,
@@ -4197,7 +4197,6 @@ class WorkerScript {
               results.push(result.data);
               transfer.concat(result.transfer);
             }
-            
             if (transfer.length>0) {
               self.postMessage(
                 {
@@ -6783,10 +6782,10 @@ const debug = {
   }  
 }
 const workerManager = {
-  workers: Math.min(10, Math.max(threadCapacity-1, 1)),
+  workers: Math.min(2, Math.max(threadCapacity-1, 1)),
   workerAssignAmount: 2,
   workerLowWaterMark: 10,
-  workerBatchPostSize: 1,
+  workerBatchPostSize: 2,
   queuedChunks: new Set(),
   workerCode: "",
   createWorkerCode(){
@@ -6838,8 +6837,8 @@ const workerManager = {
   jobs: {},
   initialize() {
     this.workerAssignAmount = 1+Math.ceil(this.workers/2);
-    this.workerLowWaterMark = 2 + this.workers*2;
-    this.workerBatchPostSize = Math.max(1, Math.ceil((this.workers - 2)/2));
+    this.workerLowWaterMark = 1 + this.workers*2;
+    this.workerBatchPostSize = Math.max(2, Math.ceil(this.workers/2));
     const pool = new WorkerPool(this.createWorker, this.workers, 4 + this.workers*3)
     workerManager.centralWorkerPool = pool;
     const cgJob = new JobType();
