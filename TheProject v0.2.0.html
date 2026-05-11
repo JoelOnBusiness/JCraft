@@ -168,10 +168,10 @@ async function loadShaders() {
   @group(1) @binding(0)
   var<uniform> model : ModelUniforms;
 
-  @group(2) @binding(0)
+  @group(1) @binding(1)
   var<storage, read> uSlotCounts : array<u32>;
 
-  @group(2) @binding(1)
+  @group(1) @binding(2)
   var<storage, read> quads : array<u32>;
 
   // --- Corner indices for 2 triangles (quad)
@@ -445,20 +445,16 @@ async function loadShaders() {
             type: "uniform",
             hasDynamicOffset: true 
           }
-        }
-      ]
-    });
-    shader.chunkBindGroupLayout = device.createBindGroupLayout({
-      entries: [
+        },
         { 
-          binding: 0, 
+          binding: 1, 
           visibility: GPUShaderStage.VERTEX,
           buffer: {
             type: "read-only-storage"
           }
         }, // slot counts
         {
-          binding: 1,
+          binding: 2,
           visibility: GPUShaderStage.VERTEX,
           buffer: {
               type: "read-only-storage"
@@ -467,7 +463,7 @@ async function loadShaders() {
       ]
     });
     shader.pipelineLayout = device.createPipelineLayout({
-      bindGroupLayouts: [shader.bindGroupLayout, shader.modelBindGroupLayout, shader.chunkBindGroupLayout]
+      bindGroupLayouts: [shader.bindGroupLayout, shader.modelBindGroupLayout]
     });
     shader.pipeline = device.createRenderPipeline({
       layout: shader.pipelineLayout,
@@ -521,13 +517,12 @@ async function loadShaders() {
             { binding: 2, resource: shader.sampler }
         ]
     }); 
-    shader.modelBindGroup = null; // created in resizeModelUniformBuffer
     shader.modelUniformStride = null; // set in resizeModelUniformBuffer 
     shader.modelUniformBuffer = null; // created in resizeModelUniformBuffer
     shader.resizeModelUniformBuffer = (newSize)=>{
-      const UNIFORM_SIZE = 64; // Model
+      shader.UNIFORM_SIZE = 64; // Model
       const ALIGNMENT = 256;
-      const STRIDE = Math.ceil(UNIFORM_SIZE / ALIGNMENT) * ALIGNMENT;
+      const STRIDE = Math.ceil(shader.UNIFORM_SIZE / ALIGNMENT) * ALIGNMENT;
 
       const requiredSize = STRIDE * newSize;
 
@@ -545,22 +540,26 @@ async function loadShaders() {
       });
 
       shader.modelUniformStride = STRIDE;
-
-      // IMPORTANT: must recreate bind group when buffer changes
-      shader.modelBindGroup = device.createBindGroup({
-          layout: shader.pipeline.getBindGroupLayout(1),
-          entries: [
-              {
-                  binding: 0,
-                  resource: {
-                      buffer: shader.modelUniformBuffer,
-                      offset: 0,
-                      size: UNIFORM_SIZE // NOT stride
-                  }
-              }
-          ]
-      });
     };
+    shader.getModelBindGroupUniformEntry = () => {
+      return {
+        binding: 0,
+        resource: {
+          buffer: shader.modelUniformBuffer,
+          offset: 0,
+          size: shader.UNIFORM_SIZE // NOT stride
+        }
+      }
+    }
+    shader.createModelBindGroup = (entries) => {
+      return device.createBindGroup({
+        layout: shader.pipeline.getBindGroupLayout(1),
+        entries: [
+          shader.getModelBindGroupUniformEntry(),
+          ...entries
+        ]
+      });
+    }
     shader.resizeModelUniformBuffer(128); 
     return shader;
   })(texture);
@@ -851,20 +850,16 @@ async function loadShaders() {
             type: "uniform",
             hasDynamicOffset: true 
           }
-        }
-      ]
-    });
-    shader.chunkBindGroupLayout = device.createBindGroupLayout({
-      entries: [
+        },
         { 
-          binding: 0, 
+          binding: 1, 
           visibility: GPUShaderStage.VERTEX,
           buffer: {
             type: "read-only-storage"
           }
         }, // slot counts
         {
-          binding: 1,
+          binding: 2,
           visibility: GPUShaderStage.VERTEX,
           buffer: {
               type: "read-only-storage"
@@ -873,7 +868,7 @@ async function loadShaders() {
       ]
     });
     shader.pipelineLayout = device.createPipelineLayout({
-      bindGroupLayouts: [shader.bindGroupLayout, shader.modelBindGroupLayout, shader.chunkBindGroupLayout]
+      bindGroupLayouts: [shader.bindGroupLayout, shader.modelBindGroupLayout]
     });
     shader.pipeline = device.createRenderPipeline({
       layout: shader.pipelineLayout,
@@ -938,13 +933,13 @@ async function loadShaders() {
               { binding: 2, resource: shader.sampler }
           ]
       }); 
-    shader.modelBindGroup = null; // created in resizeModelUniformBuffer
     shader.modelUniformStride = null; // set in resizeModelUniformBuffer 
     shader.modelUniformBuffer = null; // created in resizeModelUniformBuffer
+    shader.UNIFORM_SIZE = 64;
     shader.resizeModelUniformBuffer = (newSize)=>{
-      const UNIFORM_SIZE = 64; // Model
+      shader.UNIFORM_SIZE = 64; // Model
       const ALIGNMENT = 256;
-      const STRIDE = Math.ceil(UNIFORM_SIZE / ALIGNMENT) * ALIGNMENT;
+      const STRIDE = Math.ceil(shader.UNIFORM_SIZE / ALIGNMENT) * ALIGNMENT;
 
       const requiredSize = STRIDE * newSize;
 
@@ -962,22 +957,26 @@ async function loadShaders() {
       });
 
       shader.modelUniformStride = STRIDE;
-
-      // IMPORTANT: must recreate bind group when buffer changes
-      shader.modelBindGroup = device.createBindGroup({
-          layout: shader.pipeline.getBindGroupLayout(1),
-          entries: [
-              {
-                  binding: 0,
-                  resource: {
-                      buffer: shader.modelUniformBuffer,
-                      offset: 0,
-                      size: UNIFORM_SIZE // NOT stride
-                  }
-              }
-          ]
-      });
     };
+    shader.getModelBindGroupUniformEntry = () => {
+      return {
+        binding: 0,
+        resource: {
+          buffer: shader.modelUniformBuffer,
+          offset: 0,
+          size: shader.UNIFORM_SIZE // NOT stride
+        }
+      }
+    }
+    shader.createModelBindGroup = (entries) => {
+      return device.createBindGroup({
+        layout: shader.pipeline.getBindGroupLayout(1),
+        entries: [
+          shader.getModelBindGroupUniformEntry(),
+          ...entries
+        ]
+      });
+    }
     shader.resizeModelUniformBuffer(128); 
     return shader;
   })(texture);
@@ -2468,23 +2467,6 @@ class NibbleArray {
     this.data[byteIndex] = byte;
   }
 }
-class NibbleArrayPool{
-  constructor(initialSize = 100, arraySize = CHUNK_VOLUME){
-    this.pool = [];
-    this.arraySize = arraySize;
-    for (let i = 0; i < initialSize; i++) {
-      this.pool.push(new NibbleArray(arraySize));
-    }
-  }
-
-  get() {
-    return this.pool.pop() || new NibbleArray(this.arraySize);
-  }
-
-  release(array) {
-    this.pool.push(array);
-  }
-}
 class Transform {
   constructor(matrix = null) {
     this.data = new Float32Array(3+3+3+(!matrix * 16))
@@ -2951,14 +2933,17 @@ class WireframeModel {
 class ChunkModel {
   constructor(shader, uniformIndex, mesh, transform = null){
     this.shader = shader;
+    this.mirroredMesh = mesh.mirrored;
     this.transform = transform || new Transform();
     this.uniformIndex = uniformIndex;
     if(mesh !== null) this.mesh = mesh;
+    this.modelBindGroup = null;
   }
   unload(){
     this.transform = null;
     if(this.mesh) this.mesh.dispose();
     this.mesh = null;
+    this.mirroredMesh = false;
   }
   writeMatrixToBuffer(){
     device.queue.writeBuffer(this.shader.modelUniformBuffer, this.uniformIndex * this.shader.modelUniformStride, this.transform.getMatrix());
@@ -2968,10 +2953,17 @@ class ChunkModel {
       this.mesh.reset();
     }
   }
-  draw(passEncoder, bottom, top){
+  draw(passEncoder, bottom, top, center = null){
     const offset = this.uniformIndex * this.shader.modelUniformStride;
-    passEncoder.setBindGroup(1, this.shader.modelBindGroup, [offset]);
-    return this.mesh.draw(passEncoder, bottom, top);
+    passEncoder.setBindGroup(1, this.modelBindGroup, [offset]);
+    if(this.mirroredMesh){
+      return this.mesh.drawMirrored(passEncoder, bottom, top, center);
+    }else{
+      return this.mesh.draw(passEncoder, bottom, top);
+    }
+  }
+  createBindGroup(entries = []){
+    this.modelBindGroup = this.shader.createModelBindGroup(entries);
   }
 }
 class Chunk {
@@ -3004,8 +2996,12 @@ class Chunk {
     this.initializedModels = true;
   }
   createChunkModels(){
-    this.model = new ChunkModel(opaqueShader, this.uniformIndex, new ChunkMesh(10000, opaqueShader), this.transform);
-    this.transparentModel = new ChunkModel(transparentShader, this.uniformIndex, new ChunkMesh(4000, transparentShader), this.transform);
+    const opaqueMesh = new ChunkMesh(10000, opaqueShader);
+    this.model = new ChunkModel(opaqueShader, this.uniformIndex, opaqueMesh, this.transform);
+    this.model.createBindGroup(opaqueMesh.createBindGroupEntries());
+    const transparentMesh = new ChunkMesh(4000, transparentShader, true);
+    this.transparentModel = new ChunkModel(transparentShader, this.uniformIndex, transparentMesh, this.transform);
+    this.transparentModel.createBindGroup(transparentMesh.createBindGroupEntries());
   }
   resetData(cx, cz) {
     this.cx = cx;
@@ -3333,7 +3329,7 @@ class Chunk {
       }
     }
     this.model.mesh.writeSlotCounts();
-    this.transparentModel.mesh.writeSlotCounts();
+    this.transparentModel.mesh.writeSlotCountsMirrored();
   }
   getBlock(index) {
     return this.blockPalette[this.blocks[index]];
@@ -3578,7 +3574,8 @@ class JobType {
 class ChunkMesh {
   static QUADS_PER_SLOT = QUADS_PER_SLOT;
   static VERTS_PER_QUAD = 6;
-  constructor(baseQuadAllocation = 10000, shader) {
+  constructor(baseQuadAllocation = 10000, shader, mirrored = false) {
+    this.mirrored = mirrored;
     this.BASE_QUAD_ALLOCATION = baseQuadAllocation;
     this.LAYERS = Math.ceil(CHUNK_HEIGHT/CHUNK_SIZE);
     this.BYTES_PER_QUAD = 3 * 4;
@@ -3594,29 +3591,32 @@ class ChunkMesh {
     this.meshDataFirsts = this.meshData.subarray(0, this.LAYERS);
     this.meshDataLasts = this.meshData.subarray(this.LAYERS, this.LAYERS*2);
     this.slotSizes = new Uint8Array(this.SLOT_COUNT);
+    if (mirrored) this.mirroredSlotSizes = new Uint8Array(this.SLOT_COUNT);
     this.layersExist = new Uint8Array(this.LAYERS)
     this.slotLength = 0;
     this.nextSlot = this.SLOT_COUNT-1;
-    const maxBytes = this.TOTAL_QUADS * this.BYTES_PER_QUAD; 
+    const maxBytes = this.TOTAL_QUADS * this.BYTES_PER_QUAD * (1+mirrored); 
     this.quadBuffer = device.createBuffer({
         size: maxBytes,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         mappedAtCreation: false
     });
     this.slotCountBuffer = this.createSlotBuffer();
-    this.chunkBindGroup = device.createBindGroup({
-      layout: shader.pipeline.getBindGroupLayout(2),
-      entries: [
-        { binding: 0, resource: this.slotCountBuffer }, // per object
-        {
-          binding: 1,
-          resource: this.quadBuffer
-        }
-      ]
-    });
   }
-  updateSlotCount(slot, vertexCount) {
-    this.slotSizes[slot] = vertexCount;
+  createBindGroupEntries(){
+    return [
+      { binding: 1, resource: this.slotCountBuffer }, // per object
+      {
+        binding: 2,
+        resource: this.quadBuffer
+      }
+    ];
+  }
+  updateSlotCount(slot, quadCount) {
+    this.slotSizes[slot] = quadCount;
+  }
+  updateMirroredSlotCount(slot, quadCount){
+    this.mirroredSlotSizes[slot] = quadCount;
   }
   writeSlotCounts() {
     const data = new Uint32Array(this.slotSizes);
@@ -3629,11 +3629,25 @@ class ChunkMesh {
       data.byteLength
     );
   }
+  writeSlotCountsMirrored(){
+    const data = new Uint32Array(this.SLOT_COUNT*2);
+    data.set(this.slotSizes, this.SLOT_COUNT);
+    data.set(this.mirroredSlotSizes, 0);
+
+    device.queue.writeBuffer(
+      this.slotCountBuffer,
+      0,
+      data.buffer,
+      data.byteOffset,
+      data.byteLength
+    );
+    
+  }
   createSlotBuffer() {
     const SLOT_COUNT = this.SLOT_COUNT;
 
     // u32 = 4 bytes
-    const size = SLOT_COUNT * 4;
+    const size = SLOT_COUNT * 4 * (1+this.mirrored);
 
     const slotCountBuffer = device.createBuffer({
         size,
@@ -3645,14 +3659,40 @@ class ChunkMesh {
     return slotCountBuffer;
   }
   draw(passEncoder, bottom = 0, top = this.LAYERS-1) {
-    const {first, last} = this.rangeMinMax(this.meshDataFirsts, this.meshDataLasts, bottom, top)
+    const [first, last] = this.rangeMinMax(this.meshDataFirsts, this.meshDataLasts, bottom, top)
     if(first+last<0) return 0;
-    const start = Math.max(first, 0)*ChunkMesh.QUADS_PER_SLOT*ChunkMesh.VERTS_PER_QUAD;
-    const length = Math.min(last-first+1, this.slotLength)*ChunkMesh.QUADS_PER_SLOT*ChunkMesh.VERTS_PER_QUAD;
+    const vertsPerSlot = ChunkMesh.QUADS_PER_SLOT*ChunkMesh.VERTS_PER_QUAD;
+    const start = first*vertsPerSlot;
+    const length = Math.min(last-first+1, this.slotLength)*vertsPerSlot;
     // set the correct bind group for this chunk
-    passEncoder.setBindGroup(2, this.chunkBindGroup);
     passEncoder.draw(length, 1, start);
-    return length/ChunkMesh.QUADS_PER_SLOT;
+    return length/vertsPerSlot;
+  }
+  drawMirrored(passEncoder, bottom = 0, top = this.LAYERS-1, mirrorPlane = this.LAYERS-1){
+    const vertsPerSlot = ChunkMesh.QUADS_PER_SLOT*ChunkMesh.VERTS_PER_QUAD;
+    const [bottomUpFirst, bottomUpLast] = this.rangeMinMax(this.meshDataFirsts, this.meshDataLasts, bottom, mirrorPlane);
+    let slotsDrawn = 0;
+    if(bottomUpFirst + bottomUpLast >=0){
+      const slotCountMirror = this.SLOT_COUNT-1;
+      const first = slotCountMirror - bottomUpLast;
+      const last = slotCountMirror - bottomUpFirst;
+      const start = first*vertsPerSlot;
+      const length = Math.min(last-first+1, this.slotLength)*vertsPerSlot;
+      passEncoder.draw(length, 1, start);
+      slotsDrawn+=length/vertsPerSlot;
+    }
+    
+    if(top - (mirrorPlane+1) < 0) return slotsDrawn;
+    const [topDownFirst, topDownLast] = this.rangeMinMax(this.meshDataFirsts, this.meshDataLasts, mirrorPlane+1, top);
+    if(topDownFirst+topDownLast<0) return slotsDrawn;
+    const first = this.SLOT_COUNT + topDownFirst;
+    const last = this.SLOT_COUNT + topDownLast;
+    const start = first*vertsPerSlot;
+    const length = Math.min(last-first+1, this.slotLength)*vertsPerSlot;
+    passEncoder.draw(length, 1, start);
+    slotsDrawn+=length/vertsPerSlot;
+    
+    return slotsDrawn;
   }
   splitVertexArray(array, maxChunkLength = this.UINT32_PER_SLOT, intsPerFace = this.UINT32_PER_QUAD) {
     const chunks = [];
@@ -3667,18 +3707,33 @@ class ChunkMesh {
     const meshIndex = meshLayer;
     const bindingArrays = this.splitVertexArray(packedUint32Array);
     const ownedSlots = this.meshSlots[meshIndex] || [];
+    const quadsPerSlot =  ChunkMesh.QUADS_PER_SLOT;
+    const slotOffset = this.mirrored * this.SLOT_COUNT;
     let nextArray = 0;
     for(let i = Math.min(ownedSlots.length, bindingArrays.length)-1; i>=0; i--){
       const slot = ownedSlots[i];
-      const baseQuad = ChunkMesh.QUADS_PER_SLOT * slot;
+      const baseQuad = (slotOffset+slot) * quadsPerSlot;
+      const bindingArray = bindingArrays[nextArray];
       device.queue.writeBuffer(
         this.quadBuffer,
         baseQuad * this.BYTES_PER_QUAD, // byte offset
-        bindingArrays[nextArray],  // ArrayBuffer from your mesh
+        bindingArray,  // ArrayBuffer from your mesh
         0,
-        bindingArrays[nextArray].length     // number of bytes to write. 4 bytes per uint32
+        bindingArray.length     // number of bytes to write. 4 bytes per uint32
       );
-      this.updateSlotCount(slot, bindingArrays[nextArray].length/this.UINT32_PER_QUAD);
+      this.updateSlotCount(slot, bindingArray.length/this.UINT32_PER_QUAD);
+      if(this.mirrored){
+        const mirroredSlot = this.SLOT_COUNT-1-slot;
+        const mirroredBaseQuad = mirroredSlot * quadsPerSlot;
+        device.queue.writeBuffer(
+          this.quadBuffer,
+          mirroredBaseQuad * this.BYTES_PER_QUAD, // byte offset
+          bindingArray,  // ArrayBuffer from your mesh
+          0,
+          bindingArray.length     // number of bytes to write. 4 bytes per uint32
+        );
+        this.updateMirroredSlotCount(mirroredSlot, bindingArray.length/UINT32_PER_QUAD);
+      }
       nextArray++;
     }
     if(ownedSlots.length<bindingArrays.length){
@@ -3686,19 +3741,36 @@ class ChunkMesh {
       const newSlots = this.allocateSlots(meshIndex, neededSlots);
       for(let i = newSlots.length-1; i>=0; i--){
         const slot = newSlots[i];
-        const baseQuad = ChunkMesh.QUADS_PER_SLOT * slot;
+        const baseQuad = (slotOffset+slot) * quadsPerSlot;
+        const bindingArray = bindingArrays[nextArray];
         device.queue.writeBuffer(
           this.quadBuffer,
           baseQuad * this.BYTES_PER_QUAD, // byte offset
-          bindingArrays[nextArray],  // ArrayBuffer from your mesh
+          bindingArray,  // ArrayBuffer from your mesh
           0,
-          bindingArrays[nextArray].length     // number of bytes to write. 4 bytes per uint32
+          bindingArray.length     // number of bytes to write. 4 bytes per uint32
         );    
-        this.updateSlotCount(slot, bindingArrays[nextArray].length/this.UINT32_PER_QUAD);
+        this.updateSlotCount(slot, bindingArray.length/this.UINT32_PER_QUAD);
+        if(this.mirrored){
+          const mirroredSlot = this.SLOT_COUNT-1-slot;
+          const mirroredBaseQuad = mirroredSlot * quadsPerSlot;
+          device.queue.writeBuffer(
+            this.quadBuffer,
+            mirroredBaseQuad * this.BYTES_PER_QUAD, // byte offset
+            bindingArray,  // ArrayBuffer from your mesh
+            0,
+            bindingArray.length     // number of bytes to write. 4 bytes per uint32
+          );
+          this.updateMirroredSlotCount(mirroredSlot, bindingArray.length/UINT32_PER_QUAD);
+        }
         nextArray++;
       }
     }
-    this.writeSlotCounts();
+    if(this.mirrored){
+      this.writeSlotCountsMirrored();
+    }else{
+      this.writeSlotCounts();
+    }
     if(this.layersExist[meshIndex] === 0) this.layersExist[meshIndex] = 1;
   }
   createMesh(meshLayer, packedUint32Array) {
@@ -3708,14 +3780,24 @@ class ChunkMesh {
     const slots = this.allocateSlots(meshIndex, slotCount);
     this.meshSlots[meshIndex] = slots;
     const firstSlot = slots[slots.length-1];
-    const baseQuad = (firstSlot) * ChunkMesh.QUADS_PER_SLOT;
+    const slotOffset = this.mirrored * this.SLOT_COUNT;
+    const baseQuad = (slotOffset+firstSlot) * ChunkMesh.QUADS_PER_SLOT;
     let uint32lengthRemaining = packedUint32Array.length
     for (let i = slotCount-1; i >=0; i--) {
       const slotLength = Math.max(0, Math.min(this.UINT32_PER_SLOT, uint32lengthRemaining));
+      const slot = slots[i];
       this.updateSlotCount(
-        slots[i],
+        slot,
         slotLength / this.UINT32_PER_QUAD
       );
+      if(this.mirrored){
+        const mirroredSlot = this.SLOT_COUNT-1-slot;
+        if(i === slotCount-1){
+          this.updateMirroredSlotCount(mirroredSlot, (packedUint32Array.length % this.UINT32_PER_SLOT)/this.UINT32_PER_QUAD);
+        }else{
+          this.updateMirroredSlotCount(mirroredSlot, ChunkMesh.QUADS_PER_SLOT);
+        }
+      }
       uint32lengthRemaining -= slotLength;
     }
     
@@ -3728,12 +3810,25 @@ class ChunkMesh {
       packedUint32Array.length
     );
 
+    if(this.mirrored){
+      const lastSlot = slots[0];
+      const mirroredBaseQuad = (this.SLOT_COUNT-lastSlot-1) * ChunkMesh.QUADS_PER_SLOT;
+      device.queue.writeBuffer(
+        this.quadBuffer,
+        mirroredBaseQuad * this.BYTES_PER_QUAD,
+        packedUint32Array,
+        0,
+        packedUint32Array.length
+      );
+    }
+
     if(baseQuad < 0){
       console.log(this);
       throw new Error("Attempting to write at an offset less than 0.");
     }
 
     this.layersExist[meshIndex] = 1;
+    
   }
   allocateSlots(meshIndex, slots) {
     const allocatedSlots = [];
@@ -3784,8 +3879,8 @@ class ChunkMesh {
     }
 
     return found
-        ? { first: min, last: max }
-        : { first: -1, last: -1 };
+        ? [ min, max ]
+        : [ -1, -1 ];
   }
   doesLayerHaveMesh(layer){
     return this.layersExist[layer] > 0
@@ -5693,7 +5788,7 @@ const utils = {
   loadGPU: async function (){
     const gpu = await GPU_DATABASE.estimateGpuPower();
     console.log("GPU: " + utils.objectToKeyValueString(gpu));
-    const maxRenderDist = Math.max(10, 8*gpu.tier + 8); // Minimum 10 chunks, scale up with GPU power
+    const maxRenderDist = Math.max(10, 18*gpu.tier + 0); // Minimum 10 chunks, scale up with GPU power
     const chunkCacheAmount = utils.getChunkCacheAmount(maxRenderDist);
     chunkCache.setSize(chunkCacheAmount);
     chunkPool.setSize(chunkCacheAmount+300); // Add some extra chunks to the pool
@@ -5708,7 +5803,7 @@ const utils = {
     }
   },
   getChunkCacheAmount(renderDist){
-    return 4*(renderDist*renderDist)+3000;
+    return 4*(renderDist*renderDist)+1500;
   },
   blockAABBobj: new AABB(),
   blockAABB(x, y, z) {
@@ -7011,7 +7106,7 @@ class ChunkSampler {
           const idx = this.index(x, y, z);
           if(blocks[this.index(x, y+1, z)] === 0 && blocks[idx] === stone){
             blocks[idx] = grass;
-            for(let i = 1; i<6; i++){
+            for(let i = 1; i<4; i++){
               const idx = this.index(x, y-i, z);
               if(blocks[idx] === stone){
                 blocks[idx] = dirt;
@@ -7725,7 +7820,7 @@ function render(time){
 
   for(let i = transparentModelIndex-1; i>=0; i--){
     const {tModel, lowestLayer, highestLayer} = transparentModelsToDraw[i];
-    const d = tModel.draw(passEncoder, lowestLayer, highestLayer);
+    const d = tModel.draw(passEncoder, lowestLayer, highestLayer, camChunkLayer);
     drawn+=d;
     transparentDrawn+=d;
   }
