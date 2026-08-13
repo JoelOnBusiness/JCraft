@@ -1415,12 +1415,7 @@ class TextRenderer {
 
     this.count = 0;
 
-    this.verticesBuffer = device.createBuffer({
-        size: this.vertices.byteLength,
-        usage:
-            GPUBufferUsage.VERTEX |
-            GPUBufferUsage.COPY_DST
-    });
+    this.verticesBuffer = null;
   }
   
   begin() {
@@ -1499,6 +1494,15 @@ class TextRenderer {
     atlasWidth,
     atlasHeight
   ) {
+
+    if(!this.verticesBuffer){
+      this.verticesBuffer = device.createBuffer({
+        size: this.vertices.byteLength,
+        usage:
+            GPUBufferUsage.VERTEX |
+            GPUBufferUsage.COPY_DST
+      });
+    }
 
     this.glyphWidth = glyphWidth;
     this.glyphHeight = glyphHeight;
