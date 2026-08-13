@@ -1322,6 +1322,61 @@ class UniformBuffer {
     UniformBuffer.device.queue.writeBuffer(this.buffer, 0, this.dataBuffer);
   }
 }
+class TextureArrayBuilder {
+
+    constructor() {
+        this.device = null;
+        this.width = null;
+        this.height = null;
+
+        this.layers = [];
+    }
+
+    configure(device, width, height) {
+        this.device = device;
+        this.width = width;
+        this.height = height;
+    }
+
+    add(bitmap) {
+        this.layers.push(bitmap);
+
+        return this.layers.length - 1;
+    }
+
+    async build() {
+
+        const texture = this.device.createTexture({
+            size: {
+                width: this.width,
+                height: this.height,
+                depthOrArrayLayers: this.layers.length
+            },
+
+            format: "rgba8unorm",
+
+            usage:
+                GPUTextureUsage.TEXTURE_BINDING |
+                GPUTextureUsage.COPY_DST
+        });
+
+        for (let i = 0; i < this.layers.length; i++) {
+
+            this.device.queue.copyExternalImageToTexture(
+                {
+                    source: this.layers[i]
+                },
+                {
+                    texture,
+                    origin: [0, 0, i]
+                },
+                [this.width, this.height]
+            );
+        }
+
+        return texture;
+    }
+}
 class UIRenderer{
   static UITexturesNeeded = 0;
   static textureArrayBuilder = new TextureArrayBuilder();
