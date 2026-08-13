@@ -1338,61 +1338,7 @@ class UIRenderer{
     UIRenderer.textureArray = await UIRenderer.textureArrayBuilder.build();
   }
 }
-class TextureArrayBuilder {
 
-    constructor() {
-        this.device = null;
-        this.width = null;
-        this.height = null;
-
-        this.layers = [];
-    }
-
-    configure(device, width, height) {
-        this.device = device;
-        this.width = width;
-        this.height = height;
-    }
-
-    add(bitmap) {
-        this.layers.push(bitmap);
-
-        return this.layers.length - 1;
-    }
-
-    async build() {
-
-        const texture = this.device.createTexture({
-            size: {
-                width: this.width,
-                height: this.height,
-                depthOrArrayLayers: this.layers.length
-            },
-
-            format: "rgba8unorm",
-
-            usage:
-                GPUTextureUsage.TEXTURE_BINDING |
-                GPUTextureUsage.COPY_DST
-        });
-
-        for (let i = 0; i < this.layers.length; i++) {
-
-            this.device.queue.copyExternalImageToTexture(
-                {
-                    source: this.layers[i]
-                },
-                {
-                    texture,
-                    origin: [0, 0, i]
-                },
-                [this.width, this.height]
-            );
-        }
-
-        return texture;
-    }
-}
 const opaqueShader = new Shader(), transparentShader= new Shader(), textShader = new Shader(), uiShader = new Shader(), wireframeShader = new Shader(), partiallyOpaqueShader = new Shader(), compositeShader = new Shader(), skyShader = new Shader();
 const defaultRenderPass = new RenderPass("DEFAULT"), transparentRenderPass = new RenderPass("TRANSPARENT"), compositeRenderPass = new RenderPass("COMPOSITE"), uiRenderPass = new RenderPass("UI"), skyRenderPass = new RenderPass("SKY");
 const worldUniforms = new UniformBuffer(), skyUniforms = new UniformBuffer("SkyUniforms");
