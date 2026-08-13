@@ -521,6 +521,9 @@ class Shader {
     this.primitive = primitive;
   }
   createTextureView(texture, binding = 1, options = {visibility: Shader.FRAG_VIS, texture: { sampleType: "float" } }){
+    if(!texture){
+      console.error("Shader: ", this.name, " - Texture is undefined. Binding: ", binding, " options: ", options);
+    }
     const textureView = texture.createView();
     if(binding === 0 && this.uPVUniformBuffer) {
       console.error("Shader: ", this.name, " - Trying to bind NEW TEXTURE VIEW on top of uPVUniformBuffer! textureView: ", textureView, " binding: ", binding);
