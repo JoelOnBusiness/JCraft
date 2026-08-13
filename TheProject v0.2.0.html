@@ -165,6 +165,9 @@ class RenderPass {
         format: data.format,
         usage: data.usage
       });
+      if(!texture){
+        console.error("FAILED TO CREATE TEXTURE: ", data.label," Render Pass Header: ", data.renderPassHeader, " data: ", data);
+      }
       const textureView = texture.createView();
       const label = data.renderPassHeader + "RenderPass Texture View for "+data.label;
       textureView.label = label;
