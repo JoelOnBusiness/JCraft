@@ -430,7 +430,8 @@ class Shader {
   static FRAG_VIS = GPUShaderStage.FRAGMENT;
   static device = null;
   static shaders = [];
-  constructor(){
+  constructor(name){
+    this.name = name;
     this.listening = new Set();
     this.globalBindGroupLayout = null;
     this.modelBindGroupLayout = null;
@@ -519,11 +520,11 @@ class Shader {
   createTextureView(texture, binding = 1, options = {visibility: Shader.FRAG_VIS, texture: { sampleType: "float" } }){
     const textureView = texture.createView();
     if(binding === 0 && this.uPVUniformBuffer) {
-      console.error("Trying to bind NEW TEXTURE VIEW on top of uPVUniformBuffer! textureView: ", textureView, " binding: ", binding);
+      console.error("Shader: ", this.name, " - Trying to bind NEW TEXTURE VIEW on top of uPVUniformBuffer! textureView: ", textureView, " binding: ", binding);
       return textureView;
     };
     if(this.globalBindGroupLayoutEntries.some(entry => entry.binding === binding)){
-      console.error("Attempted to bind NEW TEXTURE VIEW on top of an existing global binding! textureView: ", textureView, " binding: ", binding, " (conflicting resource: ", this.globalBindGroupLayoutEntries.find(entry => entry.binding === binding),")");
+      console.error("Shader: ", this.name, " - Attempted to bind NEW TEXTURE VIEW on top of an existing global binding! textureView: ", textureView, " binding: ", binding, " (conflicting resource: ", this.globalBindGroupLayoutEntries.find(entry => entry.binding === binding),")");
       return textureView;
     }
     this.globalBindGroupResources.push({binding: binding, resource: textureView});
@@ -531,12 +532,15 @@ class Shader {
     return textureView;
   }
   attachTextureView(textureView, binding = 1, options = {visibility: Shader.FRAG_VIS, texture: { sampleType: "float" } }){
+    if(!textureView){
+      console.error("Shader: ", this.name, " - Texture view is null. Binding: ", binding, " options: ", options);
+    }
     if(binding === 0 && this.uPVUniformBuffer) {
-      console.error("Trying to bind TEXTURE VIEW on top of uPVUniformBuffer! textureView: ", textureView, " binding: ", binding);
+      console.error("Shader: ", this.name, " - Trying to bind TEXTURE VIEW on top of uPVUniformBuffer! textureView: ", textureView, " binding: ", binding);
       return;
     };
     if(this.globalBindGroupLayoutEntries.some(entry => entry.binding === binding)){
-      console.error("Attempted to bind TEXTURE VIEW on top of an existing global binding! textureView: ", textureView, " binding: ", binding, " (conflicting resource: ", this.globalBindGroupLayoutEntries.find(entry => entry.binding === binding),")");
+      console.error("Shader: ", this.name, " - Attempted to bind TEXTURE VIEW on top of an existing global binding! textureView: ", textureView, " binding: ", binding, " (conflicting resource: ", this.globalBindGroupLayoutEntries.find(entry => entry.binding === binding),")");
       return;
     }
     if(textureView.tag!== undefined){
@@ -558,11 +562,11 @@ class Shader {
   }, binding = 2, options = {visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } }){
     const sampler = this.device.createSampler(samplerData);
     if(binding === 0 && this.uPVUniformBuffer) {
-      console.error("Trying to bind NEW SAMPLER on top of uPVUniformBuffer! samplerData: ", samplerData, " binding: ", binding);
+      console.error("Shader: ", this.name, " - Trying to bind NEW SAMPLER on top of uPVUniformBuffer! samplerData: ", samplerData, " binding: ", binding);
       return sampler;
     };
     if(this.globalBindGroupLayoutEntries.some(entry => entry.binding === binding)){
-      console.error("Attempted to bind NEW SAMPLER on top of an existing global binding! samplerData: ", samplerData, " binding: ", binding, " (conflicting resource: ", this.globalBindGroupLayoutEntries.find(entry => entry.binding === binding),")");
+      console.error("Shader: ", this.name, " - Attempted to bind NEW SAMPLER on top of an existing global binding! samplerData: ", samplerData, " binding: ", binding, " (conflicting resource: ", this.globalBindGroupLayoutEntries.find(entry => entry.binding === binding),")");
       return;
     }
     this.globalBindGroupResources.push({binding: binding, resource: sampler});
@@ -571,11 +575,11 @@ class Shader {
   }
   attachSampler(sampler, binding = 2, options = {visibility: Shader.FRAG_VIS, sampler: { type: "filtering" } }){
     if(binding === 0 && this.uPVUniformBuffer) {
-      console.error("Trying to bind SAMPLER on top of uPVUniformBuffer! sampler: ", sampler, " binding: ", binding);
+      console.error("Shader: ", this.name, " - Trying to bind SAMPLER on top of uPVUniformBuffer! sampler: ", sampler, " binding: ", binding);
       return;
     };
     if(this.globalBindGroupLayoutEntries.some(entry => entry.binding === binding)){
-      console.error("Attempted to bind SAMPLER on top of an existing global binding! sampler: ", sampler, " binding: ", binding, " (conflicting resource: ", this.globalBindGroupLayoutEntries.find(entry => entry.binding === binding),")");
+      console.error("Shader: ", this.name, " - Attempted to bind SAMPLER on top of an existing global binding! sampler: ", sampler, " binding: ", binding, " (conflicting resource: ", this.globalBindGroupLayoutEntries.find(entry => entry.binding === binding),")");
       return;
     }
     this.globalBindGroupResources.push({binding: binding, resource: sampler});
@@ -583,11 +587,11 @@ class Shader {
   }
   addGlobalResourceAndBinding(resource = {}, binding = 3, options= {visibility: Shader.FRAG_VIS}){
     if(binding === 0 && this.uPVUniformBuffer) {
-      console.error("Trying to bind on top of uPVUniformBuffer! resource: ", resource, " binding: ", binding);
+      console.error("Shader: ", this.name, " - Trying to bind on top of uPVUniformBuffer! resource: ", resource, " binding: ", binding);
       return;
     };
     if(this.globalBindGroupLayoutEntries.some(entry => entry.binding === binding)){
-      console.error("Attempted to bind on top of an existing global binding! resource: ", resource, " binding: ", binding, " (conflicting resource: ", this.globalBindGroupLayoutEntries.find(entry => entry.binding === binding),")");
+      console.error("Shader: ", this.name, " - Attempted to bind on top of an existing global binding! resource: ", resource, " binding: ", binding, " (conflicting resource: ", this.globalBindGroupLayoutEntries.find(entry => entry.binding === binding),")");
       return;
     }
     this.globalBindGroupResources.push({binding, resource});
@@ -623,7 +627,7 @@ class Shader {
     return {buffer: newBuffer};
   }
   compileGlobalBindGroupLayout(){
-    console.log(this);
+    console.log("Shader: ", this.name, " - ", this);
     this.globalBindGroupLayout = this.device.createBindGroupLayout({
       entries: this.globalBindGroupLayoutEntries
     });
@@ -634,11 +638,11 @@ class Shader {
             hasDynamicOffset: true 
           }}){
     if(binding === 0 && this.modelUniformBuffer) {
-      console.error("Trying to bind on top of model uniform buffer! resource: ", resource, " binding: ", binding);
+      console.error("Shader: ", this.name, " - Trying to bind on top of model uniform buffer! resource: ", resource, " binding: ", binding);
       return;
     };
     if(this.modelBindGroupLayoutEntries.some(entry => entry.binding === binding)){
-      console.error("Attempted to bind on top of an existing model binding! resource: ", resource, " binding: ", binding, " (conflicting resource: ", this.modelBindGroupLayoutEntries.find(entry => entry.binding === binding),")");
+      console.error("Shader: ", this.name, " - Attempted to bind on top of an existing model binding! resource: ", resource, " binding: ", binding, " (conflicting resource: ", this.modelBindGroupLayoutEntries.find(entry => entry.binding === binding),")");
       return;
     }
     this.modelBindGroupLayoutEntries.push({binding, ...options});
@@ -1592,7 +1596,7 @@ class TextRenderer {
   }
 }
 
-const opaqueShader = new Shader(), transparentShader= new Shader(), textShader = new Shader(), uiShader = new Shader(), wireframeShader = new Shader(), partiallyOpaqueShader = new Shader(), compositeShader = new Shader(), skyShader = new Shader();
+const opaqueShader = new Shader("OPAQUE SHADER"), transparentShader= new Shader("TRANSPARENT SHADER"), textShader = new Shader("TEXT SHADER"), uiShader = new Shader("UI SHADER"), wireframeShader = new Shader("WIREFRAME SHADER"), partiallyOpaqueShader = new Shader("PARTIAL OPAQUE SHADER"), compositeShader = new Shader("COMPOSITE SHADER"), skyShader = new Shader("SKY SHADER");
 const defaultRenderPass = new RenderPass("DEFAULT"), transparentRenderPass = new RenderPass("TRANSPARENT"), compositeRenderPass = new RenderPass("COMPOSITE"), uiRenderPass = new RenderPass("UI"), skyRenderPass = new RenderPass("SKY");
 const worldUniforms = new UniformBuffer(), skyUniforms = new UniformBuffer("SkyUniforms");
 const quadBitPacker = new BitPacker(), uiQuadBitPacker = new BitPacker();
