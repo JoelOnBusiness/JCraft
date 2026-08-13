@@ -1387,6 +1387,9 @@ class UIRenderer{
   constructor(){
     this.textureArray = null;
   }
+  static getTextureArray(){
+    return UIRenderer.textureArrayBuilder.layers;
+  }
   static configure(device, width, height){
     UIRenderer.textureArrayBuilder.configure(device, width, height);
   }
@@ -2682,7 +2685,7 @@ fn main(input : FSIn) -> @location(0) vec4<f32> {
   `;
   uiShader.setShaders(uiVs, uiFs);
   uiShader.setUPVUniformBuffer(wvUBO);
-  uiShader.attachTextureView(UIRenderer.textureArrayView, 1, {visibility: GPUShaderStage.FRAGMENT,
+  uiShader.attachTextureView(UIRenderer.getTextureArray(), 1, {visibility: GPUShaderStage.FRAGMENT,
             texture: {
                 sampleType: "float",
                 viewDimension: "2d-array",
