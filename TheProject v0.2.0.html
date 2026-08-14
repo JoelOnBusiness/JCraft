@@ -2546,7 +2546,7 @@ fn main(input : FSIn) -> @location(0) vec4<f32> {
   compositeRenderPass.addColorAttachment(RenderPass.contextCurrentTextureView, null, "load", "store");
   
   await UIRenderer.buildTextureArray();
-  
+  console.dir(UIRenderer);
   // UI
   const uiVs = `
     ${worldUniforms.shaderStruct}
