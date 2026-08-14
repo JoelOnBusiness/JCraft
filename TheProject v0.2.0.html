@@ -1600,7 +1600,7 @@ class TextRenderer {
         minFilter: "nearest",
         mipmapFilter: "nearest"
     });
-    return { texture: UIRenderer.getTextureArray(), sampler };
+    return { texture: UIRenderer.getTextureArray()[this.textureIndex], sampler };
   }
 }
 
