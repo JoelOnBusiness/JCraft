@@ -2545,7 +2545,7 @@ fn main(input : FSIn) -> @location(0) vec4<f32> {
   compositeShader.compilePipeline();
   compositeRenderPass.addColorAttachment(RenderPass.contextCurrentTextureView, null, "load", "store");
   
-  UIRenderer.buildTextureArray();
+  await UIRenderer.buildTextureArray();
   
   // UI
   const uiVs = `
