@@ -1610,7 +1610,7 @@ const worldUniforms = new UniformBuffer(), skyUniforms = new UniformBuffer("SkyU
 const quadBitPacker = new BitPacker(), uiQuadBitPacker = new BitPacker();
 const uiRenderer = new UIRenderer(), textRenderer = new TextRenderer(10000);
 async function loadShaders() {
-  UIRenderer.configure();
+  UIRenderer.configure(device, 1024, 1024);
   const {texture, image} = await utils.createTextureFromBase64(device, textureAtlas);
   const textTexturePackage = await textRenderer.createFontTexture(device, 6, 12, UI_ATLAS_SIZE, UI_ATLAS_SIZE);
   RenderPass.initializeRenderPasses(device);
