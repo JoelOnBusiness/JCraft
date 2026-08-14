@@ -2544,7 +2544,8 @@ fn main(input : FSIn) -> @location(0) vec4<f32> {
   compositeShader.removeDepthStencil();
   compositeShader.compilePipeline();
   compositeRenderPass.addColorAttachment(RenderPass.contextCurrentTextureView, null, "load", "store");
-  
+  console.log("UI RENDERER");
+  console.dir(UIRenderer);
   await UIRenderer.buildTextureArray();
   console.dir(UIRenderer);
   // UI
