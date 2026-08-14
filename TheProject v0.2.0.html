@@ -1601,6 +1601,12 @@ class TextRenderer {
         mipmapFilter: "nearest"
     });
 
+    if(!UIRenderer.textureArray){
+      console.error("UIRenderer.textureArray is undefined. UIRenderer: ", UIRenderer);
+    }
+    if(!sampler){
+      console.error("Failed to create sampler.");
+    }
     return { texture: UIRenderer.textureArray, sampler };
   }
 }
