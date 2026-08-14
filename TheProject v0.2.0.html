@@ -2544,6 +2544,9 @@ fn main(input : FSIn) -> @location(0) vec4<f32> {
   compositeShader.removeDepthStencil();
   compositeShader.compilePipeline();
   compositeRenderPass.addColorAttachment(RenderPass.contextCurrentTextureView, null, "load", "store");
+  
+  UIRenderer.buildTextureArray();
+  
   // UI
   const uiVs = `
     ${worldUniforms.shaderStruct}
@@ -2690,7 +2693,7 @@ fn main(input : FSIn) -> @location(0) vec4<f32> {
   `;
   uiShader.setShaders(uiVs, uiFs);
   uiShader.setUPVUniformBuffer(wvUBO);
-  uiShader.attachTextureView(UIRenderer.getTextureArray(), 1, {visibility: GPUShaderStage.FRAGMENT,
+  uiShader.attachTextureView(UIRenderer.textureArray, 1, {visibility: GPUShaderStage.FRAGMENT,
             texture: {
                 sampleType: "float",
                 viewDimension: "2d-array",
@@ -2822,7 +2825,7 @@ fn main(input : FSIn) -> @location(0) vec4<f32> {
   }`;
   const textfs = `
   @group(0) @binding(0)
-  var uFont : texture_2d<f32>;
+  var uFont : texture_2d_array<f32>;
 
   @group(0) @binding(1)
   var uSampler : sampler;
@@ -2836,7 +2839,7 @@ fn main(input : FSIn) -> @location(0) vec4<f32> {
 
   @fragment
   fn main(input: FragmentInput) -> @location(0) vec4<f32> {
-      let alpha = textureSample(uFont, uSampler, input.vUv).a;
+      let alpha = textureSample(uFont, uSampler, input.vUv, i32(${textRenderer.textureIndex}u)).a;
 
       if (alpha < 0.1) {
           discard;
@@ -2846,7 +2849,12 @@ fn main(input : FSIn) -> @location(0) vec4<f32> {
   }
   `;
   textShader.setShaders(textvs, textfs);
-  textShader.createTextureView(textTexturePackage.texture, 0);
+  textShader.attachTextureView(UIRenderer.textureArray, 0, {visibility: GPUShaderStage.FRAGMENT,
+            texture: {
+                sampleType: "float",
+                viewDimension: "2d-array",
+                multisampled: false
+            }});
   textShader.attachSampler(textTexturePackage.sampler, 1);
   const textColorBuffer = textShader.createGlobalBuffer(16, "colorUniformBuffer", GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
   textShader.addGlobalResourceAndBinding(textColorBuffer, 2, {visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } });
@@ -2968,7 +2976,6 @@ fn main(input : FSIn) -> @location(0) vec4<f32> {
   uiRenderPass.addColorAttachment(RenderPass.contextCurrentTextureView, null, "load", "store");
   uiRenderPass.setDepthStencilAttachment(depthStencilView, 1.0, "load", "store");
 
-  UIRenderer.buildTextureArray();
   console.dir(RenderPass);
   console.dir(uiQuadBitPacker);
   return [image];
